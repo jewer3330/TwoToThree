@@ -1,0 +1,1 @@
+{"input":"public/yoyo-reference.png","frontReference":"public/yoyo-reference.png","sideReference":"yoyo-refined-front-v2.png","backReference":"yoyo-refined-back.png","primaryBackend":"sf3d","fallbackBackend":"triposr","textureResolution":1024,"targetVertexCount":-1,"output":"public/models/yoyo-sf3d.glb"}
