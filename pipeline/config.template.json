@@ -1,0 +1,15 @@
+{
+  "modelSlug": "replace-with-unique-slug",
+  "input": "replace-with-unique-slug/front.png",
+  "frontReference": "replace-with-unique-slug/front.png",
+  "sideReference": "replace-with-unique-slug/side.png",
+  "backReference": "replace-with-unique-slug/back.png",
+  "primaryBackend": "sf3d",
+  "fallbackBackend": "triposr",
+  "textureResolution": 1024,
+  "targetVertexCount": -1,
+  "remeshOption": "none",
+  "output": "public/models/replace-with-unique-slug-sf3d.glb",
+  "preserveBaseline": true,
+  "notes": "SF3D receives front.png only. Side/back are Blender alignment references. Never overwrite the baseline GLB."
+}
