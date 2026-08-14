@@ -29,7 +29,7 @@ class DecisionInput(BaseModel):notes:str=''
 class RefinementInput(BaseModel):
     sourceVersionId:str;modules:list[str]=['geometryRepair','uvUnwrap','pbrMaterials','webOptimization','visualReview'];instructions:str='';geometryRepairStrength:str='conservative';uvStrategy:str='preserve_or_smart';uvIslandMargin:float=.03;materialTemplate:str='neutral';targetTriangleRange:list[int]=[20000,120000];textureResolution:int=2048;maxWebGlbMB:int=20
 class PlanInput(BaseModel):
-    primaryBackend:str='hunyuan3d';fallbackBackends:list[str]=['sf3d','triposr'];geometryQuality:str='standard';textureResolution:int=0;faceRefinement:bool=False;targetTriangleRange:list[int]=[60000,120000];segmentationRequired:bool=False;rigRequired:bool=False;preserveBaseline:bool=True;renderViews:list[str]=['front','left-three-quarter','side','back'];limitations:list[str]=[]
+    primaryBackend:str='hunyuan3d';fallbackBackends:list[str]=['sf3d','triposr'];geometryQuality:str='standard';textureResolution:int=0;faceRefinement:bool=False;targetTriangleRange:list[int]=[60000,120000];segmentationRequired:bool=False;rigRequired:bool=False;preserveBaseline:bool=True;renderViews:list[str]=['front','left-three-quarter','side','back'];viewWeights:dict[str,float]=Field(default_factory=lambda:{'front':1.8,'side':1.0,'back':0.7});limitations:list[str]=[]
 class CommentInput(BaseModel):
     title:str=Field(min_length=1,max_length=120);description:str=Field(min_length=1,max_length=4000);category:str='other';severity:str='normal';recommendedRoute:str='reference_regeneration';meshName:str|None=None;position:dict|None=None;normal:dict|None=None;cameraSnapshot:dict|None=None;screenshotDataUrl:str|None=None
 class CommentPatch(BaseModel):
@@ -190,7 +190,7 @@ def accept_risks(pid:str):
     with db() as con:con.execute('UPDATE validations SET accepted_at=? WHERE project_id=?',(stamp,pid));con.execute("UPDATE projects SET status='awaiting_confirmation',updated_at=? WHERE id=?",(stamp,pid))
     v['acceptedAt']=stamp;return v
 def make_plan(pid):
-    p=get_project(pid);settings=load(p['settings'],{});quality=p['quality'];texture_resolution={'standard':0,'high':2048,'ultra':4096}.get(quality,0);return {'primaryBackend':'hunyuan3d','fallbackBackends':['sf3d','triposr'],'geometryQuality':quality,'textureResolution':texture_resolution,'faceRefinement':quality=='ultra','targetTriangleRange':[60000,120000],'segmentationRequired':settings.get('segmentationRequired',False),'rigRequired':settings.get('rigRequired',False),'preserveBaseline':True,'renderViews':['front','left-three-quarter','side','back'],'limitations':['单张图无法准确恢复隐藏面；背面与遮挡结构按证据置信度标记。','高/超高质量使用参考图投射保留颜色与五官；它不会把二维眼线自动雕刻成独立眼球。','自动分件与骨骼不作为 MVP 完成条件。']}
+    p=get_project(pid);settings=load(p['settings'],{});quality=p['quality'];texture_resolution={'standard':0,'high':2048,'ultra':4096}.get(quality,0);return {'primaryBackend':'hunyuan3d','fallbackBackends':['sf3d','triposr'],'geometryQuality':quality,'textureResolution':texture_resolution,'faceRefinement':quality=='ultra','targetTriangleRange':[60000,120000],'segmentationRequired':settings.get('segmentationRequired',False),'rigRequired':settings.get('rigRequired',False),'preserveBaseline':True,'renderViews':['front','left-three-quarter','side','back'],'viewWeights':{'front':1.8,'side':1.0,'back':0.7},'limitations':['单张图无法准确恢复隐藏面；背面与遮挡结构按证据置信度标记。','高/超高质量使用参考图投射保留颜色与五官；它不会把二维眼线自动雕刻成独立眼球。','自动分件与骨骼不作为 MVP 完成条件。']}
 @app.get('/api/projects/{pid}/plan')
 def get_plan(pid:str):return make_plan(pid)
 @app.patch('/api/projects/{pid}/plan')

@@ -64,7 +64,7 @@ def generate_hunyuan(image:Path,output:Path,seed:int,quality:str,log,cancelled):
     if not output.exists():raise BackendError('Hunyuan3D 未生成 GLB')
     return {'backend':'hunyuan3d','modelVersion':'tencent/Hunyuan3D-2.1','steps':steps,'resolution':resolution,'seed':seed,'processedImage':str(processed),'command':[Path(x).name if i<2 else x for i,x in enumerate(command)]}
 
-def generate_hunyuan_multiview(images:dict[str,Path],output:Path,seed:int,quality:str,log,cancelled):
+def generate_hunyuan_multiview(images:dict[str,Path],output:Path,seed:int,quality:str,view_weights:dict[str,float],log,cancelled):
     """Run a real multi-view backend; never concatenate views or silently use front only."""
     if not capabilities().get('hunyuan3dMultiview'):
         raise BackendError('检测到多视图素材，但本机未配置 Hunyuan3D-2mv。请安装多视图权重和推理脚本；系统不会静默退回单图生成。')
@@ -74,10 +74,12 @@ def generate_hunyuan_multiview(images:dict[str,Path],output:Path,seed:int,qualit
     processed=output.parent/'multiview-conditions'
     command=[str(HUNYUAN_PY),str(HUNYUAN_MV_RUNNER),'--model',str(HUNYUAN_MV_MODEL),'--output',str(output),'--processed-dir',str(processed),'--steps',str(steps),'--resolution',str(resolution),'--seed',str(seed)]
     for role in ('front','side','back'):command.extend([f'--{role}',str(images[role])])
-    log(f'Hunyuan3D-2mv 启动：views=front,side,back, steps={steps}, octree={resolution}, seed={seed}')
+    weights={role:max(0.1,min(3.0,float(view_weights.get(role,1.0)))) for role in ('front','side','back')}
+    for role in ('front','side','back'):command.extend([f'--{role}-weight',str(weights[role])])
+    log(f'Hunyuan3D-2mv 启动：views=front,side,back, weights={weights}, steps={steps}, octree={resolution}, seed={seed}')
     run_process(command,ROOT,log,cancelled,timeout=2400)
     if not output.exists():raise BackendError('Hunyuan3D-2mv 未生成 GLB')
-    return {'backend':'hunyuan3d-2mv','modelVersion':'tencent/Hunyuan3D-2mv','steps':steps,'resolution':resolution,'seed':seed,'views':['front','side','back'],'processedImages':{role:str(processed/f'condition-{"left" if role=="side" else role}.png') for role in ('front','side','back')}}
+    return {'backend':'hunyuan3d-2mv','modelVersion':'tencent/Hunyuan3D-2mv','steps':steps,'resolution':resolution,'seed':seed,'views':['front','side','back'],'viewWeights':weights,'processedImages':{role:str(processed/f'condition-{"left" if role=="side" else role}.png') for role in ('front','side','back')}}
 
 def generate_sf3d(image:Path,output:Path,texture_resolution:int,log,cancelled):
     staging=output.parent/'sf3d-output';staging.mkdir(parents=True,exist_ok=True)

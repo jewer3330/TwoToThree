@@ -79,7 +79,7 @@ def run(job_id:str):
                     if not available.get(backend):errors.append(f'{backend}: environment unavailable');continue
                     try:
                         if backend=='hunyuan3d':
-                            if len(source_images)>1:result=generate_hunyuan_multiview(source_images,out,job['seed'],config.get('geometryQuality','standard'),lambda m:log(job_id,m),lambda:should_cancel(job_id))
+                            if len(source_images)>1:result=generate_hunyuan_multiview(source_images,out,job['seed'],config.get('geometryQuality','standard'),config.get('viewWeights',{'front':1.8,'side':1.0,'back':0.7}),lambda m:log(job_id,m),lambda:should_cancel(job_id))
                             else:result=generate_hunyuan(source_image,out,job['seed'],config.get('geometryQuality','standard'),lambda m:log(job_id,m),lambda:should_cancel(job_id))
                         elif backend=='sf3d':result=generate_sf3d(source_image,out,config.get('textureResolution',2048),lambda m:log(job_id,m),lambda:should_cancel(job_id))
                         elif backend=='triposr':result=generate_triposr(source_image,out,lambda m:log(job_id,m),lambda:should_cancel(job_id))

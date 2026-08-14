@@ -31,6 +31,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--steps", type=int, default=30)
     parser.add_argument("--resolution", type=int, default=256)
     parser.add_argument("--seed", type=int, default=12345)
+    parser.add_argument("--front-weight", type=float, default=1.8)
+    parser.add_argument("--side-weight", type=float, default=1.0)
+    parser.add_argument("--back-weight", type=float, default=0.7)
     return parser.parse_args()
 
 
@@ -48,6 +51,23 @@ def main() -> None:
     pipeline = Hunyuan3DDiTFlowMatchingPipeline.from_pretrained(
         str(args.model), subfolder="hunyuan3d-dit-v2-mv", variant="fp16", device="cuda", dtype=torch.float16
     )
+    view_weights = [args.front_weight, args.side_weight, args.back_weight]
+    original_forward = pipeline.conditioner.forward
+    def weighted_forward(*forward_args, **forward_kwargs):
+        encoded = original_forward(*forward_args, **forward_kwargs)
+        def weight_tensor(tensor):
+            if not isinstance(tensor, torch.Tensor) or tensor.ndim != 3:
+                return tensor
+            if tensor.shape[1] % len(view_weights) != 0:
+                return tensor
+            tokens_per_view = tensor.shape[1] // len(view_weights)
+            scale = torch.tensor(view_weights, device=tensor.device, dtype=tensor.dtype)
+            return tensor * scale.repeat_interleave(tokens_per_view).view(1, -1, 1)
+        if isinstance(encoded, dict):
+            return {name: weight_tensor(value) for name, value in encoded.items()}
+        return weight_tensor(encoded)
+    pipeline.conditioner.forward = weighted_forward
+    print("view_weights=" + json.dumps(dict(zip(("front", "side", "back"), view_weights))))
     mesh = pipeline(
         image=images,
         num_inference_steps=args.steps,
