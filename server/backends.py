@@ -7,6 +7,10 @@ from .core import ROOT
 HUNYUAN_PY=ROOT/'.local/hunyuan-bootstrap/Scripts/python.exe'
 HUNYUAN_MODEL=ROOT/'.local/Hunyuan3D-2.1-model'
 HUNYUAN_RUNNER=ROOT/'pipeline/run_hunyuan_yoyo.py'
+HUNYUAN_MV_MODEL=ROOT/'.local/Hunyuan3D-2mv-model-v2'
+HUNYUAN_MV_RUNNER=ROOT/'pipeline/run_hunyuan_multiview.py'
+HUNYUAN_MV_WEIGHTS=HUNYUAN_MV_MODEL/'hunyuan3d-dit-v2-mv/model.fp16.safetensors'
+HUNYUAN_MV_EXPECTED_BYTES=4_928_151_562
 SF3D_PY=ROOT/'.local/stable-fast-3d/.venv-runtime/Scripts/python.exe'
 SF3D_REPO=ROOT/'.local/stable-fast-3d'
 TRIPOSR_PY=ROOT/'.local/TripoSR/.venv-runtime/Scripts/python.exe'
@@ -21,6 +25,7 @@ class CancelledError(RuntimeError):pass
 def capabilities():
     return {
         'hunyuan3d':HUNYUAN_PY.exists() and HUNYUAN_RUNNER.exists() and HUNYUAN_MODEL.exists(),
+        'hunyuan3dMultiview':HUNYUAN_PY.exists() and HUNYUAN_MV_RUNNER.exists() and HUNYUAN_MV_WEIGHTS.exists() and HUNYUAN_MV_WEIGHTS.stat().st_size==HUNYUAN_MV_EXPECTED_BYTES,
         'sf3d':SF3D_PY.exists() and (SF3D_REPO/'run.py').exists(),
         'triposr':TRIPOSR_PY.exists() and (TRIPOSR_REPO/'run.py').exists(),
         'blender':BLENDER.exists() and BLENDER_RENDERER.exists(),
@@ -51,12 +56,28 @@ def run_process(command:list[str],cwd:Path,log:Callable[[str],None],cancelled:Ca
 
 def generate_hunyuan(image:Path,output:Path,seed:int,quality:str,log,cancelled):
     steps={'standard':20,'high':30,'ultra':40}.get(quality,20)
-    resolution=256 if quality!='ultra' else 384
-    command=[str(HUNYUAN_PY),str(HUNYUAN_RUNNER),'--image',str(image),'--model',str(HUNYUAN_MODEL),'--output',str(output),'--steps',str(steps),'--resolution',str(resolution),'--seed',str(seed)]
+    resolution={'standard':256,'high':384,'ultra':512}.get(quality,256)
+    processed=output.parent/'condition-front.png'
+    command=[str(HUNYUAN_PY),str(HUNYUAN_RUNNER),'--image',str(image),'--model',str(HUNYUAN_MODEL),'--output',str(output),'--processed-image-output',str(processed),'--steps',str(steps),'--resolution',str(resolution),'--seed',str(seed)]
     log(f'Hunyuan3D 2.1 启动：steps={steps}, octree={resolution}, seed={seed}')
     run_process(command,ROOT,log,cancelled,timeout=2400)
     if not output.exists():raise BackendError('Hunyuan3D 未生成 GLB')
-    return {'backend':'hunyuan3d','modelVersion':'tencent/Hunyuan3D-2.1','steps':steps,'resolution':resolution,'seed':seed,'command':[Path(x).name if i<2 else x for i,x in enumerate(command)]}
+    return {'backend':'hunyuan3d','modelVersion':'tencent/Hunyuan3D-2.1','steps':steps,'resolution':resolution,'seed':seed,'processedImage':str(processed),'command':[Path(x).name if i<2 else x for i,x in enumerate(command)]}
+
+def generate_hunyuan_multiview(images:dict[str,Path],output:Path,seed:int,quality:str,log,cancelled):
+    """Run a real multi-view backend; never concatenate views or silently use front only."""
+    if not capabilities().get('hunyuan3dMultiview'):
+        raise BackendError('检测到多视图素材，但本机未配置 Hunyuan3D-2mv。请安装多视图权重和推理脚本；系统不会静默退回单图生成。')
+    required={'front','side','back'};missing=sorted(required-images.keys())
+    if missing:raise BackendError(f'多视图生成缺少视角：{missing}')
+    steps={'standard':20,'high':30,'ultra':40}.get(quality,20);resolution={'standard':256,'high':384,'ultra':512}.get(quality,256)
+    processed=output.parent/'multiview-conditions'
+    command=[str(HUNYUAN_PY),str(HUNYUAN_MV_RUNNER),'--model',str(HUNYUAN_MV_MODEL),'--output',str(output),'--processed-dir',str(processed),'--steps',str(steps),'--resolution',str(resolution),'--seed',str(seed)]
+    for role in ('front','side','back'):command.extend([f'--{role}',str(images[role])])
+    log(f'Hunyuan3D-2mv 启动：views=front,side,back, steps={steps}, octree={resolution}, seed={seed}')
+    run_process(command,ROOT,log,cancelled,timeout=2400)
+    if not output.exists():raise BackendError('Hunyuan3D-2mv 未生成 GLB')
+    return {'backend':'hunyuan3d-2mv','modelVersion':'tencent/Hunyuan3D-2mv','steps':steps,'resolution':resolution,'seed':seed,'views':['front','side','back'],'processedImages':{role:str(processed/f'condition-{"left" if role=="side" else role}.png') for role in ('front','side','back')}}
 
 def generate_sf3d(image:Path,output:Path,texture_resolution:int,log,cancelled):
     staging=output.parent/'sf3d-output';staging.mkdir(parents=True,exist_ok=True)
@@ -78,8 +99,10 @@ def generate_triposr(image:Path,output:Path,log,cancelled):
     output.write_bytes(candidates[0].read_bytes())
     return {'backend':'triposr','modelVersion':'stabilityai/TripoSR'}
 
-def render_blender(source:Path,output_dir:Path,web_glb:Path,log,cancelled):
-    command=[str(BLENDER),'--background','--factory-startup','--python',str(BLENDER_RENDERER),'--','--input',str(source),'--output-dir',str(output_dir),'--web-glb',str(web_glb)]
+def render_blender(source:Path,output_dir:Path,web_glb:Path,log,cancelled,quality:str='standard',texture_resolution:int=0,references:dict[str,Path]|None=None):
+    command=[str(BLENDER),'--background','--factory-startup','--python',str(BLENDER_RENDERER),'--','--input',str(source),'--output-dir',str(output_dir),'--web-glb',str(web_glb),'--quality',quality,'--texture-resolution',str(texture_resolution)]
+    for role,path in (references or {}).items():
+        if role in ('front','side','back') and path.exists():command.extend([f'--{role}',str(path)])
     log('Blender 5.2 后台四视图渲染启动')
     run_process(command,ROOT,log,cancelled,timeout=900)
     expected={v:output_dir/f'{v}.png' for v in ('front','left-three-quarter','side','back')}

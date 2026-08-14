@@ -6,13 +6,13 @@ from typing import Any
 import psutil
 from fastapi import FastAPI,File,HTTPException,Query,Request,UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse,StreamingResponse
+from fastapi.responses import FileResponse,Response,StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from PIL import Image,UnidentifiedImageError
 from pydantic import BaseModel,Field
 from .core import DATA,ROOT,db,dump,init_db,load,now,project_dir,rowdict,sha256,slugify,uid
 from .worker import STAGES,launch
-from .backends import capabilities,refine_blender,CancelledError
+from .backends import capabilities,refine_blender,generate_hunyuan,CancelledError
 
 @asynccontextmanager
 async def lifespan(_:FastAPI):
@@ -29,7 +29,15 @@ class DecisionInput(BaseModel):notes:str=''
 class RefinementInput(BaseModel):
     sourceVersionId:str;modules:list[str]=['geometryRepair','uvUnwrap','pbrMaterials','webOptimization','visualReview'];instructions:str='';geometryRepairStrength:str='conservative';uvStrategy:str='preserve_or_smart';uvIslandMargin:float=.03;materialTemplate:str='neutral';targetTriangleRange:list[int]=[20000,120000];textureResolution:int=2048;maxWebGlbMB:int=20
 class PlanInput(BaseModel):
-    primaryBackend:str='hunyuan3d';fallbackBackends:list[str]=['sf3d','triposr'];geometryQuality:str='standard';textureResolution:int=2048;targetTriangleRange:list[int]=[60000,120000];segmentationRequired:bool=False;rigRequired:bool=False;preserveBaseline:bool=True;renderViews:list[str]=['front','left-three-quarter','side','back'];limitations:list[str]=[]
+    primaryBackend:str='hunyuan3d';fallbackBackends:list[str]=['sf3d','triposr'];geometryQuality:str='standard';textureResolution:int=0;faceRefinement:bool=False;targetTriangleRange:list[int]=[60000,120000];segmentationRequired:bool=False;rigRequired:bool=False;preserveBaseline:bool=True;renderViews:list[str]=['front','left-three-quarter','side','back'];limitations:list[str]=[]
+class CommentInput(BaseModel):
+    title:str=Field(min_length=1,max_length=120);description:str=Field(min_length=1,max_length=4000);category:str='other';severity:str='normal';recommendedRoute:str='reference_regeneration';meshName:str|None=None;position:dict|None=None;normal:dict|None=None;cameraSnapshot:dict|None=None;screenshotDataUrl:str|None=None
+class CommentPatch(BaseModel):
+    title:str|None=None;description:str|None=None;category:str|None=None;severity:str|None=None;recommendedRoute:str|None=None
+class ReplyInput(BaseModel):body:str=Field(min_length=1,max_length=4000)
+class RevisionPlanInput(BaseModel):sourceVersionId:str;commentIds:list[str]=Field(min_length=1);config:dict={}
+class RevisionCreateInput(RevisionPlanInput):referenceSetId:str|None=None
+class CommentReviewInput(BaseModel):resultStatus:str;notes:str=''
 
 def project_json(r):
     d=dict(r);stage=None
@@ -80,6 +88,35 @@ def patch_project(pid:str,body:PatchInput):
             if k in data:con.execute(f'UPDATE projects SET {col}=? WHERE id=?',(data[k],pid))
         con.execute('UPDATE projects SET settings=?,updated_at=? WHERE id=?',(dump(settings),now(),pid))
     return project_json(get_project(pid))
+@app.delete('/api/projects/{pid}',status_code=204)
+def delete_project(pid:str):
+    get_project(pid)
+    with db() as con:
+        con.execute('UPDATE jobs SET cancel_requested=1 WHERE project_id=?',(pid,))
+        con.execute('UPDATE refinement_jobs SET cancel_requested=1 WHERE project_id=?',(pid,))
+        con.execute('UPDATE revision_requests SET cancel_requested=1 WHERE project_id=?',(pid,))
+        con.execute('DELETE FROM comment_replies WHERE comment_id IN (SELECT id FROM version_comments WHERE project_id=?)',(pid,))
+        con.execute('DELETE FROM comment_attachments WHERE comment_id IN (SELECT id FROM version_comments WHERE project_id=?)',(pid,))
+        con.execute('DELETE FROM reference_set_assets WHERE reference_set_id IN (SELECT id FROM reference_sets WHERE project_id=?)',(pid,))
+        con.execute('DELETE FROM revision_comment_links WHERE revision_request_id IN (SELECT id FROM revision_requests WHERE project_id=?)',(pid,))
+        con.execute('DELETE FROM version_links WHERE refinement_job_id IN (SELECT id FROM refinement_jobs WHERE project_id=?)',(pid,))
+        con.execute('DELETE FROM refinement_artifacts WHERE refinement_job_id IN (SELECT id FROM refinement_jobs WHERE project_id=?)',(pid,))
+        con.execute('DELETE FROM stages WHERE job_id IN (SELECT id FROM jobs WHERE project_id=?)',(pid,))
+        con.execute('DELETE FROM events WHERE job_id IN (SELECT id FROM jobs WHERE project_id=?)',(pid,))
+        con.execute('DELETE FROM artifacts WHERE job_id IN (SELECT id FROM jobs WHERE project_id=?)',(pid,))
+        con.execute('DELETE FROM decisions WHERE version_id IN (SELECT id FROM versions WHERE project_id=?)',(pid,))
+        con.execute('DELETE FROM revisions WHERE version_id IN (SELECT id FROM versions WHERE project_id=?)',(pid,))
+        con.execute('DELETE FROM revision_requests WHERE project_id=?',(pid,))
+        con.execute('DELETE FROM refinement_jobs WHERE project_id=?',(pid,))
+        con.execute('DELETE FROM reference_sets WHERE project_id=?',(pid,))
+        con.execute('DELETE FROM version_comments WHERE project_id=?',(pid,))
+        con.execute('DELETE FROM jobs WHERE project_id=?',(pid,))
+        con.execute('DELETE FROM validations WHERE project_id=?',(pid,))
+        con.execute('DELETE FROM assets WHERE project_id=?',(pid,))
+        con.execute('DELETE FROM versions WHERE project_id=?',(pid,))
+        con.execute('DELETE FROM projects WHERE id=?',(pid,))
+    shutil.rmtree(project_dir(pid),ignore_errors=True)
+    return Response(status_code=204)
 @app.get('/api/projects/{pid}/assets')
 def assets(pid:str):
     get_project(pid)
@@ -153,7 +190,7 @@ def accept_risks(pid:str):
     with db() as con:con.execute('UPDATE validations SET accepted_at=? WHERE project_id=?',(stamp,pid));con.execute("UPDATE projects SET status='awaiting_confirmation',updated_at=? WHERE id=?",(stamp,pid))
     v['acceptedAt']=stamp;return v
 def make_plan(pid):
-    p=get_project(pid);settings=load(p['settings'],{});return {'primaryBackend':'hunyuan3d','fallbackBackends':['sf3d','triposr'],'geometryQuality':p['quality'],'textureResolution':4096 if p['quality']=='ultra' else 2048,'targetTriangleRange':[60000,120000],'segmentationRequired':settings.get('segmentationRequired',False),'rigRequired':settings.get('rigRequired',False),'preserveBaseline':True,'renderViews':['front','left-three-quarter','side','back'],'limitations':['单张图无法准确恢复隐藏面；背面与遮挡结构按证据置信度标记。','自动分件与骨骼不作为 MVP 完成条件。','外部 GPU 后端不可用时任务会记录真实降级路线。']}
+    p=get_project(pid);settings=load(p['settings'],{});quality=p['quality'];texture_resolution={'standard':0,'high':2048,'ultra':4096}.get(quality,0);return {'primaryBackend':'hunyuan3d','fallbackBackends':['sf3d','triposr'],'geometryQuality':quality,'textureResolution':texture_resolution,'faceRefinement':quality=='ultra','targetTriangleRange':[60000,120000],'segmentationRequired':settings.get('segmentationRequired',False),'rigRequired':settings.get('rigRequired',False),'preserveBaseline':True,'renderViews':['front','left-three-quarter','side','back'],'limitations':['单张图无法准确恢复隐藏面；背面与遮挡结构按证据置信度标记。','高/超高质量使用参考图投射保留颜色与五官；它不会把二维眼线自动雕刻成独立眼球。','自动分件与骨骼不作为 MVP 完成条件。']}
 @app.get('/api/projects/{pid}/plan')
 def get_plan(pid:str):return make_plan(pid)
 @app.patch('/api/projects/{pid}/plan')
@@ -196,14 +233,26 @@ async def events(jid:str,request:Request):
     return StreamingResponse(stream(),media_type='text/event-stream',headers={'Cache-Control':'no-cache','X-Accel-Buffering':'no'})
 @app.post('/api/jobs/{jid}/cancel')
 def cancel(jid:str):
-    job_json(jid)
-    with db() as con:con.execute('UPDATE jobs SET cancel_requested=1 WHERE id=?',(jid,))
+    snapshot=job_json(jid)
+    with db() as con:
+        con.execute('UPDATE jobs SET cancel_requested=1 WHERE id=?',(jid,))
+        if snapshot['status']=='awaiting_geometry_confirmation':
+            stamp=now();con.execute("UPDATE jobs SET status='cancelled',completed_at=? WHERE id=?",(stamp,jid));con.execute("UPDATE projects SET status='cancelled',updated_at=? WHERE current_job_id=?",(stamp,jid));con.execute("UPDATE versions SET status='cancelled' WHERE id=?",(snapshot['versionId'],))
     return job_json(jid)
 @app.post('/api/jobs/{jid}/retry')
 def retry(jid:str):
     old=job_json(jid)
     with db() as con:r=con.execute('SELECT config_snapshot FROM jobs WHERE id=?',(jid,)).fetchone()
     return new_job(old['projectId'],load(r['config_snapshot'],{}),old['attempt']+1)
+@app.post('/api/jobs/{jid}/confirm-geometry')
+def confirm_geometry(jid:str):
+    snapshot=job_json(jid)
+    if snapshot['status']!='awaiting_geometry_confirmation':raise HTTPException(409,'任务尚未进入几何确认阶段')
+    with db() as con:
+        con.execute("UPDATE jobs SET status='queued',current_stage='web_optimization' WHERE id=?",(jid,))
+        con.execute("UPDATE projects SET status='rendering_review',updated_at=? WHERE current_job_id=?",(now(),jid))
+    launch(jid)
+    return job_json(jid)
 @app.get('/api/projects/{pid}/versions')
 def versions(pid:str):
     get_project(pid)
@@ -327,6 +376,204 @@ def cancel_refinement(jid:str):
 def project_refinements(pid:str):
     with db() as con:rows=con.execute('SELECT * FROM refinement_jobs WHERE project_id=? ORDER BY created_at DESC',(pid,)).fetchall()
     return [refinement_json(r) for r in rows]
+
+COMMENT_CATEGORIES={'contour','proportion','identity','geometry','intersection','missing_structure','texture','color','material','uv','other'}
+COMMENT_SEVERITIES={'blocking','important','normal','note'}
+COMMENT_ROUTES={'blender_automatic','reference_regeneration','manual','not_configured'}
+
+def comment_json(row):
+    d=dict(row)
+    with db() as con:
+        replies=con.execute('SELECT * FROM comment_replies WHERE comment_id=? ORDER BY created_at',(d['id'],)).fetchall()
+        attachments=con.execute('SELECT ca.*,a.original_name,a.storage_path,a.mime_type FROM comment_attachments ca JOIN assets a ON a.id=ca.asset_id WHERE ca.comment_id=? ORDER BY ca.created_at',(d['id'],)).fetchall()
+    return {'id':d['id'],'projectId':d['project_id'],'versionId':d['version_id'],'number':d['number'],'title':d['title'],'description':d['description'],'category':d['category'],'severity':d['severity'],'status':d['status'],'recommendedRoute':d['recommended_route'],'meshName':d['mesh_name'],'position':load(d['position_json']), 'normal':load(d['normal_json']),'cameraSnapshot':load(d['camera_snapshot_json']),'screenshotUrl':'/'+d['screenshot_path'] if d['screenshot_path'] else None,'createdAt':d['created_at'],'updatedAt':d['updated_at'],'replies':[{'id':x['id'],'authorType':x['author_type'],'body':x['body'],'attachments':load(x['attachments_json'],[]),'createdAt':x['created_at']} for x in replies],'attachments':[{'id':x['id'],'assetId':x['asset_id'],'viewRole':x['view_role'],'purpose':x['purpose'],'name':x['original_name'],'mimeType':x['mime_type'],'url':'/'+x['storage_path'].replace('\\','/')} for x in attachments]}
+
+def get_comment(cid):
+    with db() as con:r=con.execute('SELECT * FROM version_comments WHERE id=?',(cid,)).fetchone()
+    if not r:raise HTTPException(404,'Comment 不存在')
+    return r
+
+@app.post('/api/versions/{vid}/comments',status_code=201)
+def create_comment(vid:str,body:CommentInput):
+    version=version_json(vid)
+    if body.category not in COMMENT_CATEGORIES or body.severity not in COMMENT_SEVERITIES or body.recommendedRoute not in COMMENT_ROUTES:raise HTTPException(422,'Comment 分类、严重程度或处理路线无效')
+    cid=uid('cmt');stamp=now();screenshot=None
+    if body.screenshotDataUrl:
+        import base64
+        try:
+            header,data=body.screenshotDataUrl.split(',',1)
+            if 'image/png' not in header:raise ValueError()
+            raw=base64.b64decode(data,validate=True)
+            if len(raw)>10*1024*1024:raise ValueError()
+            target=project_dir(version['projectId'])/'comments';target.mkdir(parents=True,exist_ok=True);path=target/f'{cid}.png';path.write_bytes(raw);screenshot=path.relative_to(ROOT).as_posix()
+        except ValueError:raise HTTPException(422,'截图必须是小于 10MB 的 PNG data URL')
+    with db() as con:
+        number=con.execute('SELECT COALESCE(MAX(number),0)+1 FROM version_comments WHERE project_id=?',(version['projectId'],)).fetchone()[0]
+        con.execute('INSERT INTO version_comments VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',(cid,version['projectId'],vid,number,body.title,body.description,body.category,body.severity,'open',body.recommendedRoute,body.meshName,dump(body.position) if body.position else None,dump(body.normal) if body.normal else None,dump(body.cameraSnapshot) if body.cameraSnapshot else None,screenshot,stamp,stamp,None))
+    return comment_json(get_comment(cid))
+
+@app.get('/api/versions/{vid}/comments')
+def version_comments(vid:str,status:str|None=None):
+    version_json(vid);sql='SELECT * FROM version_comments WHERE version_id=?';args=[vid]
+    if status:sql+=' AND status=?';args.append(status)
+    sql+=' ORDER BY number DESC'
+    with db() as con:rows=con.execute(sql,args).fetchall()
+    return [comment_json(r) for r in rows]
+
+@app.get('/api/comments/{cid}')
+def comment(cid:str):return comment_json(get_comment(cid))
+
+@app.patch('/api/comments/{cid}')
+def patch_comment(cid:str,body:CommentPatch):
+    row=get_comment(cid)
+    if row['status'] not in ('draft','open'):raise HTTPException(409,'只有草稿或开放 Comment 可以编辑')
+    data=body.model_dump(exclude_none=True);mapping={'title':'title','description':'description','category':'category','severity':'severity','recommendedRoute':'recommended_route'}
+    with db() as con:
+        for key,value in data.items():con.execute(f'UPDATE version_comments SET {mapping[key]}=?,updated_at=? WHERE id=?',(value,now(),cid))
+    return comment_json(get_comment(cid))
+
+@app.post('/api/comments/{cid}/replies',status_code=201)
+def reply_comment(cid:str,body:ReplyInput):
+    get_comment(cid);rid=uid('rpl');stamp=now()
+    with db() as con:con.execute('INSERT INTO comment_replies VALUES(?,?,?,?,?,?)',(rid,cid,'user',body.body,'[]',stamp))
+    return comment_json(get_comment(cid))
+
+def transition_comment(cid,status):
+    row=get_comment(cid);allowed={'closed':{'open','resolved','partially_resolved','unresolved'},'open':{'closed','reopened'}}
+    if row['status'] not in allowed[status]:raise HTTPException(409,f'不能从 {row["status"]} 转为 {status}')
+    with db() as con:con.execute('UPDATE version_comments SET status=?,updated_at=?,closed_at=? WHERE id=?',(status,now(),now() if status=='closed' else None,cid))
+    return comment_json(get_comment(cid))
+@app.post('/api/comments/{cid}/close')
+def close_comment(cid:str):return transition_comment(cid,'closed')
+@app.post('/api/comments/{cid}/reopen')
+def reopen_comment(cid:str):return transition_comment(cid,'open')
+
+@app.post('/api/comments/{cid}/attachments',status_code=201)
+async def comment_attachment(cid:str,viewRole:str=Query(...),purpose:str=Query('auxiliary_reference'),file:UploadFile=File(...)):
+    row=get_comment(cid);safe=Path(file.filename or 'reference.png').name;ext=Path(safe).suffix.lower()
+    if safe!=file.filename or ext not in {'.png','.jpg','.jpeg','.webp'}:raise HTTPException(415,'仅支持 PNG/JPG/WEBP 参考图')
+    raw=await file.read(20*1024*1024+1)
+    if len(raw)>20*1024*1024:raise HTTPException(413,'图片超过 20MB')
+    aid=uid('ast');target=project_dir(row['project_id'])/'assets'/'comments';target.mkdir(parents=True,exist_ok=True);path=target/f'{aid}{ext}';path.write_bytes(raw)
+    try:
+        with Image.open(path) as im:im.verify()
+        with Image.open(path) as im:w,h=im.size;fmt=(im.format or '').lower()
+    except Exception:path.unlink(missing_ok=True);raise HTTPException(415,'图片内容无法解码')
+    mime={'png':'image/png','jpeg':'image/jpeg','webp':'image/webp'}.get(fmt)
+    if not mime:path.unlink(missing_ok=True);raise HTTPException(415,'图片格式不受支持')
+    stamp=now();link=uid('cat')
+    with db() as con:
+        con.execute('INSERT INTO assets VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',(aid,row['project_id'],f'comment-{viewRole}',safe,path.relative_to(ROOT).as_posix(),mime,len(raw),w,h,sha256(path),1,stamp))
+        con.execute('INSERT INTO comment_attachments VALUES(?,?,?,?,?,?)',(link,cid,aid,viewRole,purpose,stamp))
+    return comment_json(get_comment(cid))
+
+def reference_set_json(row):
+    d=dict(row)
+    with db() as con:assets=con.execute('SELECT rsa.*,a.original_name,a.storage_path,a.mime_type FROM reference_set_assets rsa JOIN assets a ON a.id=rsa.asset_id WHERE rsa.reference_set_id=? ORDER BY rsa.created_at',(d['id'],)).fetchall()
+    return {'id':d['id'],'projectId':d['project_id'],'number':d['number'],'parentReferenceSetId':d['parent_reference_set_id'],'status':d['status'],'consistencyReport':load(d['consistency_report'],{}),'lockedAt':d['locked_at'],'createdAt':d['created_at'],'assets':[{'assetId':a['asset_id'],'viewRole':a['view_role'],'purpose':a['purpose'],'sourceCommentId':a['source_comment_id'],'name':a['original_name'],'url':'/'+a['storage_path'].replace('\\','/')} for a in assets]}
+
+def build_reference_set(project_id,comment_ids):
+    stamp=now();rid=uid('rfs')
+    with db() as con:
+        number=con.execute('SELECT COALESCE(MAX(number),0)+1 FROM reference_sets WHERE project_id=?',(project_id,)).fetchone()[0]
+        parent=con.execute('SELECT id FROM reference_sets WHERE project_id=? ORDER BY number DESC LIMIT 1',(project_id,)).fetchone()
+        con.execute('INSERT INTO reference_sets VALUES(?,?,?,?,?,?,?,?)',(rid,project_id,number,parent['id'] if parent else None,'draft','{}',stamp,None))
+        base=con.execute("SELECT * FROM assets WHERE project_id=? AND active=1 AND role IN ('front','side','back','left-three-quarter','right-three-quarter')",(project_id,)).fetchall()
+        for a in base:con.execute('INSERT INTO reference_set_assets VALUES(?,?,?,?,?,?,?)',(uid('rsa'),rid,a['id'],a['role'],'baseline',None,stamp))
+        marks=','.join('?'*len(comment_ids));extra=con.execute(f'SELECT ca.*,a.role FROM comment_attachments ca JOIN assets a ON a.id=ca.asset_id WHERE ca.comment_id IN ({marks})',comment_ids).fetchall()
+        for a in extra:con.execute('INSERT INTO reference_set_assets VALUES(?,?,?,?,?,?,?)',(uid('rsa'),rid,a['asset_id'],a['view_role'],a['purpose'],a['comment_id'],stamp))
+    return rid
+
+@app.post('/api/revisions/plan')
+def plan_revision(body:RevisionPlanInput):
+    source=version_json(body.sourceVersionId)
+    with db() as con:comments=con.execute(f"SELECT * FROM version_comments WHERE id IN ({','.join('?'*len(body.commentIds))})",body.commentIds).fetchall()
+    if len(comments)!=len(set(body.commentIds)) or any(c['version_id']!=body.sourceVersionId for c in comments):raise HTTPException(422,'所选 Comments 必须属于源版本')
+    routes={r:sum(c['recommended_route']==r for c in comments) for r in COMMENT_ROUTES};usable=sum(r['recommended_route']=='reference_regeneration' for r in comments)
+    return {'sourceVersion':source,'comments':[comment_json(c) for c in comments],'routes':routes,'canCreate':usable>0,'excludedCommentIds':[c['id'] for c in comments if c['recommended_route']!='reference_regeneration'],'risk':'Hunyuan 将根据完整 Reference Set 重新生成独立候选版本，不保证只修改标注区域，也不保证拓扑、UV 或材质保持不变。'}
+
+@app.post('/api/revisions',status_code=201)
+def create_revision(body:RevisionCreateInput):
+    plan=plan_revision(body)
+    if not plan['canCreate']:raise HTTPException(409,'所选 Comments 中没有可执行的参考图重生成项')
+    selected=[c for c in plan['comments'] if c['recommendedRoute']=='reference_regeneration'];cid=[c['id'] for c in selected];source=plan['sourceVersion'];rid=body.referenceSetId or build_reference_set(source['projectId'],cid);request_id=uid('rev');stamp=now()
+    with db() as con:
+        rs=con.execute('SELECT * FROM reference_sets WHERE id=? AND project_id=?',(rid,source['projectId'])).fetchone()
+        if not rs or rs['locked_at']:raise HTTPException(409,'Reference Set 不存在或已经锁定')
+        assets=con.execute('SELECT view_role FROM reference_set_assets WHERE reference_set_id=?',(rid,)).fetchall();views={a['view_role'] for a in assets};report={'valid':'front' in views,'views':sorted(views),'warnings':[] if len(views)>=2 else ['建议增加侧面或 3/4 参考图']}
+        if not report['valid']:raise HTTPException(422,'Reference Set 至少需要一张正面图')
+        con.execute("UPDATE reference_sets SET status='locked',consistency_report=?,locked_at=? WHERE id=?",(dump(report),stamp,rid))
+        con.execute('INSERT INTO revision_requests VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)',(request_id,source['projectId'],body.sourceVersionId,None,rid,'queued','reference_regeneration',dump(body.config),dump([f'[{stamp[11:19]}] 修订任务已创建，Reference Set v{rs["number"]} 已锁定']),stamp,None,None,None,0))
+        for c in selected:
+            con.execute('INSERT INTO revision_comment_links VALUES(?,?,?,?,?,?,?,?,?)',(uid('rcl'),request_id,c['id'],body.sourceVersionId,None,None,None,stamp,None))
+            con.execute("UPDATE version_comments SET status='planned',updated_at=? WHERE id=?",(stamp,c['id']))
+    threading.Thread(target=run_revision,args=(request_id,),daemon=True).start()
+    return revision_json(request_id)
+
+def revision_json(rid):
+    with db() as con:
+        r=con.execute('SELECT * FROM revision_requests WHERE id=?',(rid,)).fetchone()
+        if not r:raise HTTPException(404,'修订任务不存在')
+        links=con.execute('SELECT * FROM revision_comment_links WHERE revision_request_id=?',(rid,)).fetchall();rs=con.execute('SELECT * FROM reference_sets WHERE id=?',(r['reference_set_id'],)).fetchone()
+    d=dict(r);return {'id':d['id'],'projectId':d['project_id'],'sourceVersionId':d['source_version_id'],'outputVersionId':d['output_version_id'],'referenceSet':reference_set_json(rs),'status':d['status'],'route':d['route'],'config':load(d['config_snapshot'],{}),'logs':load(d['logs'],[]),'errorSummary':d['error_summary'],'createdAt':d['created_at'],'startedAt':d['started_at'],'completedAt':d['completed_at'],'comments':[comment_json(get_comment(x['comment_id']))|{'resultStatus':x['result_status'],'resultNotes':x['result_notes']} for x in links]}
+
+def run_revision(rid):
+    logs=[]
+    def log(message):
+        logs.append(f'[{now()[11:19]}] {message}')
+        with db() as con:con.execute('UPDATE revision_requests SET logs=? WHERE id=?',(dump(logs),rid))
+    def cancelled():
+        with db() as con:return bool(con.execute('SELECT cancel_requested FROM revision_requests WHERE id=?',(rid,)).fetchone()[0])
+    try:
+        with db() as con:
+            r=dict(con.execute('SELECT * FROM revision_requests WHERE id=?',(rid,)).fetchone());config=load(r['config_snapshot'],{});logs=load(r['logs'],[])
+            asset=con.execute("SELECT a.storage_path FROM reference_set_assets rsa JOIN assets a ON a.id=rsa.asset_id WHERE rsa.reference_set_id=? ORDER BY CASE rsa.purpose WHEN 'revised_design' THEN 0 ELSE 1 END, CASE rsa.view_role WHEN 'front' THEN 0 ELSE 1 END LIMIT 1",(r['reference_set_id'],)).fetchone()
+            number=con.execute('SELECT COALESCE(MAX(number),0)+1 FROM versions WHERE project_id=?',(r['project_id'],)).fetchone()[0]
+            con.execute("UPDATE revision_requests SET status='processing',started_at=? WHERE id=?",(now(),rid));con.execute("UPDATE version_comments SET status='processing',updated_at=? WHERE id IN (SELECT comment_id FROM revision_comment_links WHERE revision_request_id=?)",(now(),rid))
+        if not capabilities().get('hunyuan3d'):raise RuntimeError('真实 Hunyuan3D 环境未配置，任务不会使用模拟产物')
+        if not capabilities().get('blenderRefinement'):raise RuntimeError('真实 Blender 自动精修环境未配置')
+        root=project_dir(r['project_id'])/'revisions'/rid;root.mkdir(parents=True,exist_ok=True);raw=root/'hunyuan-candidate.glb';seed=int(config.get('seed',random.randint(1,2**31-1)));quality=config.get('quality','standard')
+        generate_hunyuan(ROOT/asset['storage_path'],raw,seed,quality,log,cancelled)
+        refdir=root/'blender';refdir.mkdir();cfg={'modules':['geometryRepair','uvUnwrap','pbrMaterials','webOptimization','visualReview'],'instructions':'Reference Set candidate post-processing','geometryRepairStrength':'conservative','uvStrategy':'preserve_or_smart','uvIslandMargin':.03,'materialTemplate':'neutral','targetTriangleRange':[20000,120000],'textureResolution':2048,'maxWebGlbMB':20};cfg_path=root/'blender-config.json';cfg_path.write_text(json.dumps(cfg,ensure_ascii=False),encoding='utf-8');result=refine_blender(raw,refdir,cfg_path,log,cancelled,ROOT/asset['storage_path'])
+        out=uid('ver');stamp=now();status='awaiting_review' if result.get('status')=='passed' else 'quality_failed'
+        with db() as con:
+            con.execute('INSERT INTO versions VALUES(?,?,?,?,?,?,?)',(out,r['project_id'],number,f'v{number:03d} · Reference Set 候选重生成','ready_for_review' if status=='awaiting_review' else 'quality_failed',dump(result),stamp))
+            jid=uid('ref');con.execute('INSERT INTO refinement_jobs(id,project_id,source_version_id,output_version_id,status,config,module_states,logs,created_at,started_at,completed_at,blender_version,quality_report) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',(jid,r['project_id'],r['source_version_id'],out,status,dump(cfg),dump({m:'passed' for m in cfg['modules']}),dump(logs),r['created_at'],r['started_at'],stamp,result.get('blenderVersion'),dump(result)));con.execute('INSERT INTO version_links VALUES(?,?,?,?,?)',(uid('vln'),r['source_version_id'],out,jid,stamp))
+            files=[('glb','candidate-refined.glb',refdir/'refined.glb','model/gltf-binary')]+[('render',f'{v}.png',refdir/f'{v}.png','image/png') for v in ('front','left-three-quarter','side','back')]
+            for kind,label,path,mime in files:
+                if path.exists():con.execute('INSERT INTO refinement_artifacts VALUES(?,?,?,?,?,?,?,?,?,?,?)',(uid('rart'),jid,out,kind,label,path.relative_to(ROOT).as_posix(),mime,path.stat().st_size,sha256(path),dump({'revisionRequestId':rid}),stamp))
+            con.execute('UPDATE revision_requests SET output_version_id=?,status=?,completed_at=? WHERE id=?',(out,status,stamp,rid));con.execute('UPDATE revision_comment_links SET output_version_id=? WHERE revision_request_id=?',(out,rid));con.execute("UPDATE version_comments SET status='awaiting_review',updated_at=? WHERE id IN (SELECT comment_id FROM revision_comment_links WHERE revision_request_id=?)",(stamp,rid))
+    except CancelledError as exc:
+        with db() as con:con.execute("UPDATE revision_requests SET status='cancelled',completed_at=?,error_summary=? WHERE id=?",(now(),str(exc),rid));con.execute("UPDATE version_comments SET status='open',updated_at=? WHERE id IN (SELECT comment_id FROM revision_comment_links WHERE revision_request_id=?)",(now(),rid))
+    except Exception as exc:
+        log(f'修订任务失败：{exc}')
+        with db() as con:con.execute("UPDATE revision_requests SET status='failed',completed_at=?,error_summary=? WHERE id=?",(now(),str(exc),rid));con.execute("UPDATE version_comments SET status='open',updated_at=? WHERE id IN (SELECT comment_id FROM revision_comment_links WHERE revision_request_id=?)",(now(),rid))
+
+@app.get('/api/revisions/{rid}')
+def get_revision(rid:str):return revision_json(rid)
+@app.post('/api/revisions/{rid}/cancel')
+def cancel_revision(rid:str):
+    revision_json(rid)
+    with db() as con:con.execute('UPDATE revision_requests SET cancel_requested=1 WHERE id=?',(rid,))
+    return revision_json(rid)
+@app.post('/api/revisions/{rid}/retry',status_code=201)
+def retry_revision(rid:str):
+    old=revision_json(rid)
+    if old['status'] not in ('failed','cancelled'):raise HTTPException(409,'只有失败或取消的任务可以重试')
+    return create_revision(RevisionCreateInput(sourceVersionId=old['sourceVersionId'],commentIds=[c['id'] for c in old['comments']],config=old['config']))
+@app.post('/api/revisions/{rid}/comments/{cid}/review')
+def review_revision_comment(rid:str,cid:str,body:CommentReviewInput):
+    mapping={'resolved':'resolved','partially_resolved':'partially_resolved','unresolved':'unresolved','new_issue':'unresolved'}
+    if body.resultStatus not in mapping:raise HTTPException(422,'复核结果无效')
+    with db() as con:
+        link=con.execute('SELECT * FROM revision_comment_links WHERE revision_request_id=? AND comment_id=?',(rid,cid)).fetchone()
+        if not link:raise HTTPException(404,'Comment 不属于该修订任务')
+        req=con.execute('SELECT status FROM revision_requests WHERE id=?',(rid,)).fetchone()
+        if req['status']!='awaiting_review':raise HTTPException(409,'任务尚未进入人工复核')
+        con.execute('UPDATE revision_comment_links SET result_status=?,result_notes=?,reviewed_at=? WHERE revision_request_id=? AND comment_id=?',(body.resultStatus,body.notes,now(),rid,cid));con.execute('UPDATE version_comments SET status=?,updated_at=? WHERE id=?',(mapping[body.resultStatus],now(),cid))
+        if body.resultStatus=='new_issue':
+            src=get_comment(cid);newid=uid('cmt');number=con.execute('SELECT COALESCE(MAX(number),0)+1 FROM version_comments WHERE project_id=?',(src['project_id'],)).fetchone()[0];stamp=now();con.execute('INSERT INTO version_comments VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',(newid,src['project_id'],link['output_version_id'],number,f'衍生问题：{src["title"]}',body.notes or '候选版本产生了新问题',src['category'],src['severity'],'open',src['recommended_route'],src['mesh_name'],src['position_json'],src['normal_json'],src['camera_snapshot_json'],None,stamp,stamp,None))
+    return revision_json(rid)
 
 def seed_demo():
     with db() as con:
