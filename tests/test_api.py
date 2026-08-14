@@ -14,7 +14,7 @@ def test_project_validation_and_job_contract(monkeypatch,tmp_path):
     sample=worker.ROOT/'public/models/yoyo-sf3d.glb'
     def fake_generate(image,output,seed,quality,log,cancelled):
         output.parent.mkdir(parents=True,exist_ok=True);shutil.copy2(sample,output);return {'backend':'hunyuan3d','modelVersion':'test'}
-    def fake_render(source,output_dir,web_glb,log,cancelled):
+    def fake_render(source,output_dir,web_glb,log,cancelled,*args,**kwargs):
         output_dir.mkdir(parents=True,exist_ok=True);shutil.copy2(source,web_glb);result={}
         for name in ('front','left-three-quarter','side','back'):
             path=output_dir/f'{name}.png';path.write_bytes(image_bytes((32,32)));result[name]=path
@@ -46,7 +46,7 @@ def test_project_validation_and_job_contract(monkeypatch,tmp_path):
             if snapshot['status'] in {'awaiting_geometry_confirmation','failed'}:break
             time.sleep(.1)
         assert snapshot['status']=='awaiting_geometry_confirmation'
-        assert not any(a['type']=='render' for a in snapshot['artifacts'])
+        assert any(a['type']=='render' for a in snapshot['artifacts'])
         assert client.post(f'/api/jobs/{jid}/confirm-geometry').status_code==200
         for _ in range(80):
             snapshot=client.get(f'/api/jobs/{jid}').json()
@@ -139,3 +139,53 @@ def test_delete_project_removes_record_and_files():
         assert deleted.status_code==204
         assert client.get(f'/api/projects/{pid}').status_code==404
         assert not directory.exists()
+
+def test_detail_plan_confirmation_and_candidate_gate(monkeypatch):
+    import server.main as main
+    from server.core import db
+    def fake_detail(source,region_key,view_role,output,seed,denoise,log,cancelled):
+        output.parent.mkdir(parents=True,exist_ok=True);output.write_bytes(image_bytes((64,64)));return {'provider':'test','seed':seed,'denoise':denoise}
+    monkeypatch.setattr(main,'generate_detail_candidate',fake_detail)
+    with TestClient(app) as client:
+        pid=client.post('/api/projects',json={'name':'Detail plan contract','subjectType':'character','intendedUse':'web','quality':'standard'}).json()['id']
+        for role in ('front','side','back'):
+            assert client.post(f'/api/projects/{pid}/assets?role={role}',files={'file':(f'{role}.png',image_bytes(),'image/png')}).status_code==201
+        validation=client.post(f'/api/projects/{pid}/validate').json()
+        if validation['verdict']=='conditional':assert client.post(f'/api/projects/{pid}/validation/accept-risks').status_code==200
+        plan=client.post(f'/api/projects/{pid}/detail-plans',json={'mode':'balanced'})
+        assert plan.status_code==201
+        payload=plan.json();assert len(payload['regions'])==11 and payload['sourceReferenceSetId']
+        region=next(r for r in payload['regions'] if r['regionKey']=='face')
+        assert client.patch(f"/api/detail-plans/{payload['id']}/regions/{region['id']}",json={'selected':True,'targetUsage':'material'}).status_code==200
+        confirmed=client.post(f"/api/detail-plans/{payload['id']}/confirm")
+        assert confirmed.status_code==200 and confirmed.json()['status']=='confirmed'
+        assert client.patch(f"/api/detail-plans/{payload['id']}/regions/{region['id']}",json={'selected':False}).status_code==409
+        job=client.post(f"/api/detail-plans/{payload['id']}/jobs",json={'candidateCount':2})
+        assert job.status_code==201
+        for _ in range(50):
+            current=client.get(f"/api/detail-jobs/{job.json()['id']}").json()
+            if current['status'] in ('awaiting_approval','failed'):break
+            time.sleep(.02)
+        assert current['status']=='awaiting_approval' and len(current['groups'])>=2
+        first,second=current['groups'][:2];assert first['assets']
+        approved=client.post(f"/api/detail-candidate-groups/{first['id']}/approve",json={'notes':'approve'})
+        assert approved.status_code==200 and approved.json()['referenceSet']['status']=='locked'
+        assert approved.json()['referenceSet']['parentReferenceSetId']==payload['sourceReferenceSetId']
+        reference_set_id=approved.json()['referenceSet']['id']
+        consumption=client.get(f'/api/reference-sets/{reference_set_id}/consumption-map')
+        assert consumption.status_code==200
+        mapping=consumption.json();assert set(mapping['hunyuanInputs'])=={'front','side','back'}
+        assert mapping['hunyuanInputs']['front']['purpose']=='baseline'
+        assert any(a['purpose']=='material' for a in mapping['blenderOnlyAssets'])
+        monkeypatch.setattr(main,'launch',lambda _job_id:None)
+        geometry_plan=client.get(f'/api/projects/{pid}/plan').json();geometry_plan['referenceSetId']=reference_set_id
+        assert client.patch(f'/api/projects/{pid}/plan',json=geometry_plan).status_code==200
+        geometry_job=client.post(f'/api/projects/{pid}/jobs')
+        assert geometry_job.status_code==201
+        with db() as con:
+            snapshot=__import__('json').loads(con.execute('SELECT config_snapshot FROM jobs WHERE id=?',(geometry_job.json()['id'],)).fetchone()[0])
+        assert snapshot['referenceSetConsumption']['referenceSetId']==reference_set_id
+        assert snapshot['referenceSetConsumption']['hunyuanInputs']['front']['sha256']==mapping['hunyuanInputs']['front']['sha256']
+        rejected=client.post(f"/api/detail-candidate-groups/{second['id']}/reject",json={'notes':'not suitable'})
+        assert rejected.status_code==200
+        assert client.post(f"/api/detail-candidate-groups/{second['id']}/reject",json={'notes':'again'}).status_code==409

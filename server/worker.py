@@ -54,10 +54,27 @@ def should_cancel(job_id):
 def run(job_id:str):
     try:
         with db() as con:
-            job=dict(con.execute('SELECT * FROM jobs WHERE id=?',(job_id,)).fetchone());assets=con.execute("SELECT * FROM assets WHERE project_id=? AND role IN ('front','side','back') AND active=1 ORDER BY created_at DESC",(job['project_id'],)).fetchall();project=con.execute('SELECT subject_type FROM projects WHERE id=?',(job['project_id'],)).fetchone();con.execute("UPDATE jobs SET status='running',started_at=COALESCE(started_at,?) WHERE id=?",(now(),job_id))
-        by_role={a['role']:a for a in assets};asset=by_role.get('front')
-        if not asset:raise ValueError('缺少活动正面素材')
-        source_image=ROOT/asset['storage_path'];source_images={role:ROOT/a['storage_path'] for role,a in by_role.items()};config=json.loads(job['config_snapshot']);version_root=project_dir(job['project_id'])/'versions'/job['version_id']
+            job=dict(con.execute('SELECT * FROM jobs WHERE id=?',(job_id,)).fetchone());project=con.execute('SELECT subject_type FROM projects WHERE id=?',(job['project_id'],)).fetchone();con.execute("UPDATE jobs SET status='running',started_at=COALESCE(started_at,?) WHERE id=?",(now(),job_id))
+        config=json.loads(job['config_snapshot']);consumption=config.get('referenceSetConsumption');by_role={};blender_references={};deferred_detail_assets=[]
+        if consumption:
+            if consumption.get('warnings'):raise ValueError('; '.join(consumption['warnings']))
+            with db() as con:
+                for role,item in consumption.get('hunyuanInputs',{}).items():
+                    row=con.execute('SELECT * FROM assets WHERE id=? AND project_id=?',(item['assetId'],job['project_id'])).fetchone()
+                    if not row or row['sha256']!=item['sha256']:raise ValueError(f'Reference Set 输入 {role} 缺失或哈希不一致')
+                    by_role[role]=row
+                for item in consumption.get('blenderOnlyAssets',[]):
+                    row=con.execute('SELECT * FROM assets WHERE id=? AND project_id=?',(item['assetId'],job['project_id'])).fetchone()
+                    if not row or row['sha256']!=item['sha256']:raise ValueError(f"Blender 细节资产 {item['assetId']} 缺失或哈希不一致")
+                    if item['purpose']=='material' and item['viewRole'] in ('front','side','back'):blender_references[item['viewRole']]=ROOT/row['storage_path']
+                    else:deferred_detail_assets.append(item)
+            log(job_id,f"读取锁定 Reference Set {consumption['referenceSetId']}；Hunyuan 实际输入={sorted(by_role)}；Blender 专用资产={len(consumption.get('blenderOnlyAssets',[]))}")
+        else:
+            with db() as con:assets=con.execute("SELECT * FROM assets WHERE project_id=? AND role IN ('front','side','back') AND active=1 ORDER BY created_at DESC",(job['project_id'],)).fetchall()
+            by_role={a['role']:a for a in assets}
+        asset=by_role.get('front')
+        if not asset:raise ValueError('缺少正面素材')
+        source_image=ROOT/asset['storage_path'];source_images={role:ROOT/a['storage_path'] for role,a in by_role.items()};version_root=project_dir(job['project_id'])/'versions'/job['version_id']
         emit(job_id,'job.status',{'status':'running'});log(job_id,'Worker 已领取任务；资源类型 gpu，单任务串行执行')
         for index,(key,label) in enumerate(STAGES):
             with db() as con:existing=con.execute('SELECT status FROM stages WHERE job_id=? AND stage_key=?',(job_id,key)).fetchone()
@@ -106,6 +123,9 @@ def run(job_id:str):
                 quality=config.get('geometryQuality','standard');texture_resolution=0 if quality=='standard' else (4096 if quality=='ultra' else 2048)
                 processed_dir=version_root/'models'/'multiview-conditions';references={'front':processed_dir/'condition-front.png','side':processed_dir/'condition-left.png','back':processed_dir/'condition-back.png'}
                 if not references['front'].exists():references={'front':version_root/'models'/'condition-front.png'}
+                for role,path in blender_references.items():references[role]=path
+                if blender_references:log(job_id,f'Blender 使用已批准材质候选视图：{sorted(blender_references)}')
+                if deferred_detail_assets:log(job_id,f'记录 {len(deferred_detail_assets)} 个局部/法线细节资产；当前阶段不伪装为已烘焙，将转入局部精修')
                 render_sources=render_blender(baseline,outdir,web_glb,lambda m:log(job_id,m),lambda:should_cancel(job_id),quality,texture_resolution,references)
                 add_artifact(job,'glb','web.glb',web_glb,'model/gltf-binary',{'backend':job['actual_backend'],'normalizedBy':'Blender 5.2','source':'baseline.glb','quality':quality,'geometryResolution':{'standard':256,'high':384,'ultra':512}[quality],'textureResolution':texture_resolution or None,'faceRefinement':quality=='ultra'})
                 for view,source in render_sources.items():add_artifact(job,'render',view,source,'image/png',{'view':view,'renderer':'Blender 5.2'})

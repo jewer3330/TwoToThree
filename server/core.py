@@ -41,6 +41,9 @@ def init_db():
         columns={r['name'] for r in con.execute('PRAGMA table_info(refinement_jobs)')}
         for name,definition in (('cancel_requested','INTEGER NOT NULL DEFAULT 0'),('blender_version','TEXT'),('quality_report','TEXT')):
             if name not in columns:con.execute(f'ALTER TABLE refinement_jobs ADD COLUMN {name} {definition}')
+        detail_columns={r['name'] for r in con.execute('PRAGMA table_info(detail_generation_jobs)')}
+        for name,definition in (('current_step','INTEGER NOT NULL DEFAULT 0'),('total_steps','INTEGER NOT NULL DEFAULT 0'),('current_message','TEXT'),('logs_json',"TEXT NOT NULL DEFAULT '[]'")):
+            if name not in detail_columns:con.execute(f'ALTER TABLE detail_generation_jobs ADD COLUMN {name} {definition}')
 
 def rowdict(row:sqlite3.Row|None)->dict[str,Any]|None:
     if row is None:return None
