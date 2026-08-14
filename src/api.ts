@@ -1,4 +1,4 @@
-import type {Project,Asset,Validation,Job,Version,RefinementJob,VersionComment,RevisionRequest} from './types';
+import type {Project,Asset,Validation,Job,Version,RefinementJob,VersionComment,RevisionRequest,DetailPlan,DetailJob} from './types';
 const json = async <T>(r:Response):Promise<T> => { if(!r.ok){const body=await r.json().catch(()=>({detail:r.statusText}));throw new Error(body.detail||body.error?.message||r.statusText)} return r.json() };
 export const api = {
  health:()=>fetch('/api/system/health').then(json),
@@ -38,4 +38,15 @@ export const api = {
  createRevision:(body:unknown)=>fetch('/api/revisions',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(json<RevisionRequest>),
  revision:(id:string)=>fetch(`/api/revisions/${id}`).then(json<RevisionRequest>),
  reviewRevisionComment:(rid:string,cid:string,resultStatus:string,notes='')=>fetch(`/api/revisions/${rid}/comments/${cid}/review`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({resultStatus,notes})}).then(json<RevisionRequest>),
+ createDetailPlan:(projectId:string,mode='balanced')=>fetch(`/api/projects/${projectId}/detail-plans`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode})}).then(json<DetailPlan>),
+ detailPlan:(id:string)=>fetch(`/api/detail-plans/${id}`).then(json<DetailPlan>),
+ updateDetailRegion:(planId:string,regionId:string,body:unknown)=>fetch(`/api/detail-plans/${planId}/regions/${regionId}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(json<DetailPlan>),
+ confirmDetailPlan:(id:string)=>fetch(`/api/detail-plans/${id}/confirm`,{method:'POST'}).then(json<DetailPlan>),
+ createDetailJob:(id:string,candidateCount=2)=>fetch(`/api/detail-plans/${id}/jobs`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({candidateCount})}).then(json<DetailJob>),
+ detailJob:(id:string)=>fetch(`/api/detail-jobs/${id}`).then(json<DetailJob>),
+ cancelDetailJob:(id:string)=>fetch(`/api/detail-jobs/${id}/cancel`,{method:'POST'}).then(json<DetailJob>),
+ retryDetailJob:(id:string)=>fetch(`/api/detail-jobs/${id}/retry`,{method:'POST'}).then(json<DetailJob>),
+ approveDetailGroup:(id:string,notes='')=>fetch(`/api/detail-candidate-groups/${id}/approve`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({notes})}).then(json),
+ rejectDetailGroup:(id:string,notes='')=>fetch(`/api/detail-candidate-groups/${id}/reject`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({notes})}).then(json),
+ referenceConsumption:(id:string)=>fetch(`/api/reference-sets/${id}/consumption-map`).then(json),
 };

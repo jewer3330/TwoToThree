@@ -29,11 +29,12 @@ export default function PlanPage() {
   const { projectId = "" } = useParams(),
     nav = useNavigate();
   const [plan, setPlan] = useState<any>();
+  const [consumption,setConsumption]=useState<any>();
   const [error, setError] = useState("");
   useEffect(() => {
     api
       .plan(projectId)
-      .then(setPlan)
+      .then(async (value:any)=>{const referenceSetId=new URLSearchParams(location.search).get('referenceSetId');const next={...value,referenceSetId:referenceSetId||undefined};setPlan(next);if(referenceSetId)setConsumption(await api.referenceConsumption(referenceSetId))})
       .catch((e) => setError(e.message));
   }, [projectId]);
   const setQuality = (geometryQuality: string) =>
@@ -139,6 +140,7 @@ export default function PlanPage() {
               </span>
             ))}
           </div>
+          {consumption&&<div className="panel outputs"><h2>Reference Set 实际消费映射</h2>{Object.entries(consumption.hunyuanInputs).map(([role,item]:any)=><span key={role}><CheckCircle2/>{role} → Hunyuan3D-2mv · {item.name} · {item.sha256.slice(0,12)}</span>)}{consumption.blenderOnlyAssets.map((item:any)=><span key={`${item.assetId}-${item.purpose}`}><Layers3/>{item.viewRole} → 仅 Blender/{item.purpose} · {item.name}</span>)}{consumption.warnings.map((warning:string)=><div className="notice danger" key={warning}>{warning}</div>)}</div>}
         </section>
         <aside>
           <div className="panel risk-panel">

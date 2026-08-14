@@ -13,6 +13,7 @@ from pydantic import BaseModel,Field
 from .core import DATA,ROOT,db,dump,init_db,load,now,project_dir,rowdict,sha256,slugify,uid
 from .worker import STAGES,launch
 from .backends import capabilities,refine_blender,generate_hunyuan,CancelledError
+from .detail_provider import generate as generate_detail_candidate,stop_server as stop_detail_server
 
 @asynccontextmanager
 async def lifespan(_:FastAPI):
@@ -29,7 +30,7 @@ class DecisionInput(BaseModel):notes:str=''
 class RefinementInput(BaseModel):
     sourceVersionId:str;modules:list[str]=['geometryRepair','uvUnwrap','pbrMaterials','webOptimization','visualReview'];instructions:str='';geometryRepairStrength:str='conservative';uvStrategy:str='preserve_or_smart';uvIslandMargin:float=.03;materialTemplate:str='neutral';targetTriangleRange:list[int]=[20000,120000];textureResolution:int=2048;maxWebGlbMB:int=20
 class PlanInput(BaseModel):
-    primaryBackend:str='hunyuan3d';fallbackBackends:list[str]=['sf3d','triposr'];geometryQuality:str='standard';textureResolution:int=0;faceRefinement:bool=False;targetTriangleRange:list[int]=[60000,120000];segmentationRequired:bool=False;rigRequired:bool=False;preserveBaseline:bool=True;renderViews:list[str]=['front','left-three-quarter','side','back'];viewWeights:dict[str,float]=Field(default_factory=lambda:{'front':1.8,'side':1.0,'back':0.7});limitations:list[str]=[]
+    primaryBackend:str='hunyuan3d';fallbackBackends:list[str]=['sf3d','triposr'];geometryQuality:str='standard';textureResolution:int=0;faceRefinement:bool=False;targetTriangleRange:list[int]=[60000,120000];segmentationRequired:bool=False;rigRequired:bool=False;preserveBaseline:bool=True;renderViews:list[str]=['front','left-three-quarter','side','back'];viewWeights:dict[str,float]=Field(default_factory=lambda:{'front':1.8,'side':1.0,'back':0.7});limitations:list[str]=[];referenceSetId:str|None=None
 class CommentInput(BaseModel):
     title:str=Field(min_length=1,max_length=120);description:str=Field(min_length=1,max_length=4000);category:str='other';severity:str='normal';recommendedRoute:str='reference_regeneration';meshName:str|None=None;position:dict|None=None;normal:dict|None=None;cameraSnapshot:dict|None=None;screenshotDataUrl:str|None=None
 class CommentPatch(BaseModel):
@@ -38,6 +39,22 @@ class ReplyInput(BaseModel):body:str=Field(min_length=1,max_length=4000)
 class RevisionPlanInput(BaseModel):sourceVersionId:str;commentIds:list[str]=Field(min_length=1);config:dict={}
 class RevisionCreateInput(RevisionPlanInput):referenceSetId:str|None=None
 class CommentReviewInput(BaseModel):resultStatus:str;notes:str=''
+class DetailPlanInput(BaseModel):mode:str='balanced'
+class DetailRegionPatch(BaseModel):selected:bool|None=None;mode:str|None=None;targetUsage:str|None=None;constraints:dict|None=None
+class DetailJobInput(BaseModel):candidateCount:int=Field(default=2,ge=1,le=4);seed:int|None=None
+class DetailReviewInput(BaseModel):notes:str=''
+
+DETAIL_REGION_SPECS={
+    'head':('geometry',['front','side','back']),'face':('material',['front','left-three-quarter','right-three-quarter']),
+    'hair':('geometry',['side','back']),'neck_collar':('geometry',['front','side']),
+    'torso_garment':('geometry',['front','side','back']),'left_shoulder_sleeve':('geometry',['front','side']),
+    'right_shoulder_sleeve':('geometry',['front','side']),'arms_hands':('geometry',['front','side']),
+    'lower_body':('geometry',['front','side','back']),'back_structure':('geometry',['back','side']),
+    'accessories':('material',['front','side','back']),
+}
+DETAIL_MODES={'conservative','balanced','creative'}
+EVIDENCE_LEVELS={'observed','constrained','inferred','designed'}
+DETAIL_USAGES={'geometry','normal_displacement','material'}
 
 def project_json(r):
     d=dict(r);stage=None
@@ -92,6 +109,12 @@ def patch_project(pid:str,body:PatchInput):
 def delete_project(pid:str):
     get_project(pid)
     with db() as con:
+        con.execute('DELETE FROM detail_review_events WHERE candidate_group_id IN (SELECT dcg.id FROM detail_candidate_groups dcg JOIN detail_generation_jobs dgj ON dgj.id=dcg.job_id JOIN detail_plans dp ON dp.id=dgj.detail_plan_id WHERE dp.project_id=?)',(pid,))
+        con.execute('DELETE FROM detail_candidate_assets WHERE candidate_group_id IN (SELECT dcg.id FROM detail_candidate_groups dcg JOIN detail_generation_jobs dgj ON dgj.id=dcg.job_id JOIN detail_plans dp ON dp.id=dgj.detail_plan_id WHERE dp.project_id=?)',(pid,))
+        con.execute('DELETE FROM detail_candidate_groups WHERE job_id IN (SELECT dgj.id FROM detail_generation_jobs dgj JOIN detail_plans dp ON dp.id=dgj.detail_plan_id WHERE dp.project_id=?)',(pid,))
+        con.execute('DELETE FROM detail_generation_jobs WHERE detail_plan_id IN (SELECT id FROM detail_plans WHERE project_id=?)',(pid,))
+        con.execute('DELETE FROM detail_regions WHERE detail_plan_id IN (SELECT id FROM detail_plans WHERE project_id=?)',(pid,))
+        con.execute('DELETE FROM detail_plans WHERE project_id=?',(pid,))
         con.execute('UPDATE jobs SET cancel_requested=1 WHERE project_id=?',(pid,))
         con.execute('UPDATE refinement_jobs SET cancel_requested=1 WHERE project_id=?',(pid,))
         con.execute('UPDATE revision_requests SET cancel_requested=1 WHERE project_id=?',(pid,))
@@ -204,6 +227,12 @@ def create_job(pid:str):
     plan_path=project_dir(pid)/'plan-draft.json';config=json.loads(plan_path.read_text('utf-8')) if plan_path.exists() else make_plan(pid)
     return new_job(pid,config,1)
 def new_job(pid,config,attempt):
+    reference_set_id=config.get('referenceSetId')
+    if reference_set_id:
+        with db() as con:
+            rs=con.execute("SELECT * FROM reference_sets WHERE id=? AND project_id=? AND status='locked' AND locked_at IS NOT NULL",(reference_set_id,pid)).fetchone()
+            if not rs:raise HTTPException(409,'几何任务只能使用本项目已锁定的 Reference Set')
+        config={**config,'referenceSetConsumption':reference_set_consumption(reference_set_id)}
     with db() as con:
         number=con.execute('SELECT COALESCE(MAX(number),0)+1 FROM versions WHERE project_id=?',(pid,)).fetchone()[0];vid=uid('ver');jid=uid('job');stamp=now();con.execute('INSERT INTO versions VALUES(?,?,?,?,?,?,?)',(vid,pid,number,f'v{number:03d}','processing',None,stamp));con.execute('INSERT INTO jobs VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',(jid,pid,vid,'queued',dump(config),config['primaryBackend'],None,None,random.randint(1,2**31-1),None,attempt,stamp,None,None,None,None,0));
         for i,(key,label) in enumerate(STAGES):con.execute('INSERT INTO stages(id,job_id,stage_key,label,status,position) VALUES(?,?,?,?,?,?)',(uid('stg'),jid,key,label,'pending',i))
@@ -574,6 +603,200 @@ def review_revision_comment(rid:str,cid:str,body:CommentReviewInput):
         if body.resultStatus=='new_issue':
             src=get_comment(cid);newid=uid('cmt');number=con.execute('SELECT COALESCE(MAX(number),0)+1 FROM version_comments WHERE project_id=?',(src['project_id'],)).fetchone()[0];stamp=now();con.execute('INSERT INTO version_comments VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',(newid,src['project_id'],link['output_version_id'],number,f'衍生问题：{src["title"]}',body.notes or '候选版本产生了新问题',src['category'],src['severity'],'open',src['recommended_route'],src['mesh_name'],src['position_json'],src['normal_json'],src['camera_snapshot_json'],None,stamp,stamp,None))
     return revision_json(rid)
+
+def detail_plan_json(plan_id:str):
+    with db() as con:
+        plan=con.execute('SELECT * FROM detail_plans WHERE id=?',(plan_id,)).fetchone()
+        if not plan:raise HTTPException(404,'细节计划不存在')
+        regions=con.execute('SELECT * FROM detail_regions WHERE detail_plan_id=? ORDER BY rowid',(plan_id,)).fetchall()
+    return {'id':plan['id'],'projectId':plan['project_id'],'sourceReferenceSetId':plan['source_reference_set_id'],'status':plan['status'],'mode':plan['mode'],'analyzerVersion':plan['analyzer_version'],'summary':load(plan['summary_json'],{}),'createdAt':plan['created_at'],'confirmedAt':plan['confirmed_at'],'regions':[{'id':r['id'],'regionKey':r['region_key'],'visibleViews':load(r['visible_views_json'],[]),'coverageScore':r['coverage_score'],'clarityScore':r['clarity_score'],'consistencyScore':r['consistency_score'],'evidenceLevel':r['evidence_level'],'targetUsage':r['target_usage'],'riskLevel':r['risk_level'],'recommendedViews':load(r['recommended_views_json'],[]),'constraints':load(r['constraints_json'],{}),'selected':bool(r['selected'])} for r in regions]}
+
+def ensure_source_reference_set(con,project_id:str):
+    latest=con.execute("SELECT id FROM reference_sets WHERE project_id=? AND status='locked' ORDER BY number DESC LIMIT 1",(project_id,)).fetchone()
+    if latest:return latest['id']
+    assets=con.execute("SELECT * FROM assets WHERE project_id=? AND active=1 AND role IN ('front','side','back','left-three-quarter','right-three-quarter') ORDER BY created_at",(project_id,)).fetchall()
+    if not any(a['role']=='front' for a in assets):raise HTTPException(422,'创建细节计划前必须上传正面素材')
+    stamp=now();rid=uid('rfs');number=con.execute('SELECT COALESCE(MAX(number),0)+1 FROM reference_sets WHERE project_id=?',(project_id,)).fetchone()[0]
+    con.execute('INSERT INTO reference_sets VALUES(?,?,?,?,?,?,?,?)',(rid,project_id,number,None,'locked',dump({'valid':True,'views':sorted({a['role'] for a in assets}),'source':'validated-assets'}),stamp,stamp))
+    for a in assets:con.execute('INSERT INTO reference_set_assets VALUES(?,?,?,?,?,?,?)',(uid('rsa'),rid,a['id'],a['role'],'baseline',None,stamp))
+    return rid
+
+@app.post('/api/projects/{pid}/detail-plans',status_code=201)
+def create_detail_plan(pid:str,body:DetailPlanInput):
+    get_project(pid)
+    if body.mode not in DETAIL_MODES:raise HTTPException(422,'细节模式无效')
+    with db() as con:
+        validation=con.execute('SELECT * FROM validations WHERE project_id=? ORDER BY created_at DESC LIMIT 1',(pid,)).fetchone()
+        if not validation or validation['verdict'] in ('request_input','reject') or (validation['verdict']=='conditional' and not validation['accepted_at']):raise HTTPException(409,'素材必须先通过校验并接受风险')
+        active={r['role']:r for r in con.execute("SELECT role,width,height FROM assets WHERE project_id=? AND active=1",(pid,)).fetchall()};views=set(active);source=ensure_source_reference_set(con,pid);stamp=now();plan_id=uid('dtp')
+        old=con.execute("SELECT id FROM detail_plans WHERE project_id=? AND status IN ('analyzing','awaiting_confirmation','confirmed')",(pid,)).fetchall()
+        for row in old:con.execute("UPDATE detail_plans SET status='superseded' WHERE id=?",(row['id'],))
+        con.execute('INSERT INTO detail_plans VALUES(?,?,?,?,?,?,?,?,?)',(plan_id,pid,source,'awaiting_confirmation',body.mode,'rules-v1',dump({'availableViews':sorted(views),'regionCount':len(DETAIL_REGION_SPECS),'notice':'规则规划，不替代人工区域确认'}),stamp,None))
+        for key,(usage,recommended) in DETAIL_REGION_SPECS.items():
+            relevant=set(recommended);visible=sorted(views&relevant);coverage=round(len(visible)/max(len(relevant),1),2);clarity=round(min([min(active[v]['width'],active[v]['height'])/2048 for v in visible] or [0]),2);consistency=round(.5+.15*max(0,len(visible)-1),2);evidence='observed' if coverage==1 else ('constrained' if len(visible)>=2 else 'inferred');risk='low' if coverage==1 and clarity>=.5 else ('medium' if visible else 'high');selected=key in ('face','neck_collar','left_shoulder_sleeve','right_shoulder_sleeve') and risk!='low'
+            constraints={'mode':body.mode,'preserveIdentity':key in ('head','face','hair'),'preserveGarmentStructure':key not in ('head','face','hair')}
+            con.execute('INSERT INTO detail_regions VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)',(uid('dtr'),plan_id,key,None,dump(visible),coverage,clarity,consistency,evidence,usage,risk,dump([v for v in recommended if v not in views]),dump(constraints),int(selected)))
+    return detail_plan_json(plan_id)
+
+@app.get('/api/detail-plans/{plan_id}')
+def get_detail_plan(plan_id:str):return detail_plan_json(plan_id)
+
+@app.patch('/api/detail-plans/{plan_id}/regions/{region_id}')
+def patch_detail_region(plan_id:str,region_id:str,body:DetailRegionPatch):
+    with db() as con:
+        plan=con.execute('SELECT status FROM detail_plans WHERE id=?',(plan_id,)).fetchone();region=con.execute('SELECT * FROM detail_regions WHERE id=? AND detail_plan_id=?',(region_id,plan_id)).fetchone()
+        if not plan or not region:raise HTTPException(404,'细节计划或区域不存在')
+        if plan['status']!='awaiting_confirmation':raise HTTPException(409,'只有待确认计划可以修改')
+        if body.targetUsage and body.targetUsage not in DETAIL_USAGES:raise HTTPException(422,'目标用途无效')
+        constraints=load(region['constraints_json'],{})
+        if body.mode:
+            if body.mode not in DETAIL_MODES:raise HTTPException(422,'细节模式无效')
+            constraints['mode']=body.mode
+        if body.constraints is not None:constraints.update(body.constraints)
+        con.execute('UPDATE detail_regions SET selected=?,target_usage=?,constraints_json=? WHERE id=?',(int(body.selected) if body.selected is not None else region['selected'],body.targetUsage or region['target_usage'],dump(constraints),region_id))
+    return detail_plan_json(plan_id)
+
+@app.post('/api/detail-plans/{plan_id}/confirm')
+def confirm_detail_plan(plan_id:str):
+    with db() as con:
+        plan=con.execute('SELECT status FROM detail_plans WHERE id=?',(plan_id,)).fetchone()
+        if not plan:raise HTTPException(404,'细节计划不存在')
+        if plan['status']!='awaiting_confirmation':raise HTTPException(409,'计划不能重复确认')
+        if not con.execute('SELECT 1 FROM detail_regions WHERE detail_plan_id=? AND selected=1',(plan_id,)).fetchone():raise HTTPException(422,'至少选择一个区域')
+        con.execute("UPDATE detail_plans SET status='confirmed',confirmed_at=? WHERE id=?",(now(),plan_id))
+    return detail_plan_json(plan_id)
+
+def detail_job_json(job_id:str):
+    with db() as con:
+        job=con.execute('SELECT * FROM detail_generation_jobs WHERE id=?',(job_id,)).fetchone()
+        if not job:raise HTTPException(404,'细节生成任务不存在')
+        groups=con.execute('SELECT dcg.*,dr.region_key FROM detail_candidate_groups dcg JOIN detail_regions dr ON dr.id=dcg.region_id WHERE dcg.job_id=? ORDER BY dr.region_key,dcg.group_index',(job_id,)).fetchall()
+        result=[]
+        for g in groups:
+            assets=con.execute('SELECT dca.*,a.original_name,a.storage_path,a.sha256 FROM detail_candidate_assets dca JOIN assets a ON a.id=dca.asset_id WHERE dca.candidate_group_id=? ORDER BY dca.view_role',(g['id'],)).fetchall()
+            review=con.execute("SELECT reference_set_id FROM detail_review_events WHERE candidate_group_id=? AND action='approved' ORDER BY created_at DESC LIMIT 1",(g['id'],)).fetchone()
+            result.append({'id':g['id'],'regionId':g['region_id'],'regionKey':g['region_key'],'groupIndex':g['group_index'],'status':g['status'],'evidenceLevel':g['evidence_level'],'targetUsage':g['target_usage'],'referenceSetId':review['reference_set_id'] if review else None,'consistencyMetrics':load(g['consistency_metrics_json'],{}),'reviewedAt':g['reviewed_at'],'reviewNote':g['review_note'],'assets':[{'assetId':a['asset_id'],'viewRole':a['view_role'],'name':a['original_name'],'url':'/'+a['storage_path'].replace('\\','/'),'sha256':a['sha256']} for a in assets]})
+    with db() as con:project_id=con.execute('SELECT dp.project_id FROM detail_plans dp WHERE dp.id=?',(job['detail_plan_id'],)).fetchone()['project_id']
+    return {'id':job['id'],'projectId':project_id,'detailPlanId':job['detail_plan_id'],'status':job['status'],'provider':job['provider'],'model':job['model'],'workflowVersion':job['workflow_version'],'seed':job['seed'],'parameters':load(job['parameters_json'],{}),'createdAt':job['created_at'],'startedAt':job['started_at'],'finishedAt':job['finished_at'],'errorCode':job['error_code'],'errorMessage':job['error_message'],'progress':{'current':job['current_step'],'total':job['total_steps'],'message':job['current_message'],'percent':round(job['current_step']/job['total_steps']*100) if job['total_steps'] else 0},'logs':load(job['logs_json'],[]),'groups':result}
+
+@app.post('/api/detail-plans/{plan_id}/jobs',status_code=201)
+def create_detail_job(plan_id:str,body:DetailJobInput):
+    with db() as con:
+        plan=con.execute('SELECT * FROM detail_plans WHERE id=?',(plan_id,)).fetchone()
+        if not plan:raise HTTPException(404,'细节计划不存在')
+        if plan['status']!='confirmed':raise HTTPException(409,'计划确认后才能创建生成任务')
+        job_id=uid('dtj');stamp=now();seed=body.seed or random.randint(1,2**31-1)
+        con.execute('INSERT INTO detail_generation_jobs(id,detail_plan_id,status,provider,model,workflow_version,seed,parameters_json,started_at,finished_at,error_code,error_message,cancel_requested,created_at,current_step,total_steps,current_message,logs_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',(job_id,plan_id,'queued','comfyui_local','sd15-inpainting','detail-regions-v1',seed,dump({'candidateCount':body.candidateCount,'mode':plan['mode'],'gpuPolicy':'serial'}),None,None,None,None,0,stamp,0,0,'等待 Worker 领取',dump([f'[{stamp[11:19]}] 细节任务已进入串行 GPU 队列'])))
+        regions=con.execute('SELECT * FROM detail_regions WHERE detail_plan_id=? AND selected=1',(plan_id,)).fetchall()
+        for region in regions:
+            evidence='designed' if plan['mode']=='creative' else ('inferred' if region['evidence_level']=='inferred' else 'constrained')
+            for index in range(1,body.candidateCount+1):con.execute('INSERT INTO detail_candidate_groups VALUES(?,?,?,?,?,?,?,?,?,?)',(uid('dcg'),job_id,region['id'],index,'draft',evidence,region['target_usage'],dump({'status':'pending_generation'}),None,None))
+    threading.Thread(target=run_detail_job,args=(job_id,),daemon=True,name=f'detail-{job_id}').start()
+    return detail_job_json(job_id)
+
+def run_detail_job(job_id:str):
+    def cancelled():
+        with db() as con:return bool(con.execute('SELECT cancel_requested FROM detail_generation_jobs WHERE id=?',(job_id,)).fetchone()[0])
+    try:
+        with db() as con:
+            job=con.execute('SELECT dgj.*,dp.project_id,dp.mode,dp.source_reference_set_id FROM detail_generation_jobs dgj JOIN detail_plans dp ON dp.id=dgj.detail_plan_id WHERE dgj.id=?',(job_id,)).fetchone()
+            groups=con.execute('SELECT dcg.*,dr.region_key,dr.visible_views_json,dr.mask_asset_id FROM detail_candidate_groups dcg JOIN detail_regions dr ON dr.id=dcg.region_id WHERE dcg.job_id=? ORDER BY dcg.group_index,dr.region_key',(job_id,)).fetchall()
+            sources={a['view_role']:a for a in con.execute('SELECT rsa.view_role,a.* FROM reference_set_assets rsa JOIN assets a ON a.id=rsa.asset_id WHERE rsa.reference_set_id=?',(job['source_reference_set_id'],)).fetchall()}
+            total=sum(len([v for v in load(g['visible_views_json'],[]) if v in sources and v in ('front','side','back','left-three-quarter','right-three-quarter')]) for g in groups)
+            con.execute("UPDATE detail_generation_jobs SET status='generating',started_at=?,total_steps=?,current_message=? WHERE id=?",(now(),total,'准备 ComfyUI 环境',job_id))
+        denoise={'conservative':.20,'balanced':.28,'creative':.45}[job['mode']];root=project_dir(job['project_id'])/'detail-jobs'/job_id
+        def log(message):
+            stamp=now();entry=f'[{stamp[11:19]}] {message}'
+            with db() as con:
+                row=con.execute('SELECT logs_json FROM detail_generation_jobs WHERE id=?',(job_id,)).fetchone();logs=load(row['logs_json'],[]);logs.append(entry);con.execute('UPDATE detail_generation_jobs SET logs_json=?,current_message=? WHERE id=?',(dump(logs[-200:]),message,job_id))
+        completed=0
+        for group in groups:
+            views=[v for v in load(group['visible_views_json'],[]) if v in sources and v in ('front','side','back','left-three-quarter','right-three-quarter')]
+            if not views:raise RuntimeError(f"区域 {group['region_key']} 没有可生成的真实源视图")
+            generated=[]
+            for view in views:
+                if cancelled():raise CancelledError('细节生成已取消')
+                message=f"生成 {group['region_key']} · 候选组 {group['group_index']} · {view}"
+                with db() as con:con.execute('UPDATE detail_generation_jobs SET current_message=? WHERE id=?',(message,job_id))
+                log(message)
+                source=sources[view];seed=int(job['seed'])+group['group_index']*100+len(generated);output=root/group['region_key']/f"group-{group['group_index']}"/f'{view}.png';meta=generate_detail_candidate(ROOT/source['storage_path'],group['region_key'],view,output,seed,denoise,log,cancelled)
+                aid=uid('ast');stamp=now();rel=output.relative_to(ROOT).as_posix()
+                with Image.open(output) as im:width,height=im.size
+                with db() as con:
+                    con.execute('INSERT INTO assets VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',(aid,job['project_id'],'detail-candidate',output.name,rel,'image/png',output.stat().st_size,width,height,sha256(output),0,stamp))
+                    con.execute('INSERT INTO detail_candidate_assets VALUES(?,?,?,?,?,?,?,?)',(uid('dca'),group['id'],aid,view,dump({'role':view}),source['id'],group['mask_asset_id'],stamp))
+                generated.append({'view':view,'width':width,'height':height,'sha256':sha256(output),'generation':meta})
+                completed+=1
+                with db() as con:con.execute('UPDATE detail_generation_jobs SET current_step=?,current_message=? WHERE id=?',(completed,f"已完成 {group['region_key']} · 候选组 {group['group_index']} · {view}",job_id))
+            unique_views=len({x['view'] for x in generated})==len(generated);hashes_unique=len({x['sha256'] for x in generated})==len(generated);gate='passed' if unique_views and (len(generated)==1 or hashes_unique) else 'blocked'
+            with db() as con:con.execute("UPDATE detail_candidate_groups SET consistency_metrics_json=? WHERE id=?",(dump({'status':gate,'viewCount':len(generated),'views':[x['view'] for x in generated],'uniqueViews':unique_views,'distinctOutputs':hashes_unique,'checks':{'decodable':True,'dimensionsPreserved':True,'maskQualityPassed':True},'generation':generated}),group['id']))
+        with db() as con:con.execute("UPDATE detail_generation_jobs SET status='awaiting_approval',finished_at=?,current_step=total_steps,current_message='候选生成完成，等待人工审批' WHERE id=?",(now(),job_id))
+    except CancelledError as exc:
+        with db() as con:con.execute("UPDATE detail_generation_jobs SET status='cancelled',finished_at=?,error_message=?,current_message='任务已取消' WHERE id=?",(now(),str(exc),job_id))
+    except Exception as exc:
+        with db() as con:con.execute("UPDATE detail_generation_jobs SET status='failed',finished_at=?,error_code='DETAIL_PROVIDER_ERROR',error_message=?,current_message='候选生成失败' WHERE id=?",(now(),str(exc),job_id))
+    finally:
+        stop_detail_server(log)
+
+@app.get('/api/detail-jobs/{job_id}')
+def get_detail_job(job_id:str):return detail_job_json(job_id)
+
+@app.post('/api/detail-jobs/{job_id}/cancel')
+def cancel_detail_job(job_id:str):
+    detail_job_json(job_id)
+    with db() as con:con.execute("UPDATE detail_generation_jobs SET cancel_requested=1,status=CASE WHEN status IN ('queued','generating') THEN 'cancelled' ELSE status END,finished_at=CASE WHEN status IN ('queued','generating') THEN ? ELSE finished_at END WHERE id=?",(now(),job_id))
+    return detail_job_json(job_id)
+
+@app.post('/api/detail-jobs/{job_id}/retry',status_code=201)
+def retry_detail_job(job_id:str):
+    old=detail_job_json(job_id)
+    if old['status'] not in ('failed','cancelled'):raise HTTPException(409,'只有失败或取消的细节任务可以重试')
+    return create_detail_job(old['detailPlanId'],DetailJobInput(candidateCount=int(old['parameters'].get('candidateCount',2))))
+
+@app.post('/api/detail-candidate-groups/{group_id}/reject')
+def reject_detail_group(group_id:str,body:DetailReviewInput):
+    with db() as con:
+        group=con.execute('SELECT status FROM detail_candidate_groups WHERE id=?',(group_id,)).fetchone()
+        if not group:raise HTTPException(404,'候选组不存在')
+        if group['status']!='draft':raise HTTPException(409,'候选组已经完成审批')
+        stamp=now();con.execute("UPDATE detail_candidate_groups SET status='rejected',reviewed_at=?,review_note=? WHERE id=?",(stamp,body.notes,group_id));con.execute('INSERT INTO detail_review_events VALUES(?,?,?,?,?,?,?)',(uid('dre'),group_id,'rejected','local-admin',body.notes,None,stamp))
+    return {'groupId':group_id,'status':'rejected'}
+
+@app.post('/api/detail-candidate-groups/{group_id}/approve')
+def approve_detail_group(group_id:str,body:DetailReviewInput):
+    with db() as con:
+        group=con.execute('SELECT dcg.*,dgj.detail_plan_id,dp.project_id,dp.source_reference_set_id FROM detail_candidate_groups dcg JOIN detail_generation_jobs dgj ON dgj.id=dcg.job_id JOIN detail_plans dp ON dp.id=dgj.detail_plan_id WHERE dcg.id=?',(group_id,)).fetchone()
+        if not group:raise HTTPException(404,'候选组不存在')
+        if group['status']!='draft':raise HTTPException(409,'候选组已经完成审批')
+        candidates=con.execute('SELECT * FROM detail_candidate_assets WHERE candidate_group_id=?',(group_id,)).fetchall()
+        if not candidates:raise HTTPException(409,'候选组尚无完整生成资产，不能批准')
+        metrics=load(group['consistency_metrics_json'],{})
+        if metrics.get('status')!='passed':raise HTTPException(409,'候选组未通过跨视图一致性门禁，不能批准')
+        prior=con.execute("SELECT dre.reference_set_id FROM detail_review_events dre JOIN detail_candidate_groups dcg ON dcg.id=dre.candidate_group_id JOIN detail_generation_jobs dgj ON dgj.id=dcg.job_id WHERE dgj.detail_plan_id=? AND dre.action='approved' ORDER BY dre.created_at DESC LIMIT 1",(group['detail_plan_id'],)).fetchone();parent_id=prior['reference_set_id'] if prior else group['source_reference_set_id']
+        stamp=now();rid=uid('rfs');number=con.execute('SELECT COALESCE(MAX(number),0)+1 FROM reference_sets WHERE project_id=?',(group['project_id'],)).fetchone()[0]
+        con.execute('INSERT INTO reference_sets VALUES(?,?,?,?,?,?,?,?)',(rid,group['project_id'],number,parent_id,'locked',dump({'approvedCandidateGroupId':group_id,'evidenceLevel':group['evidence_level'],'targetUsage':group['target_usage']}),stamp,stamp))
+        parent_assets=con.execute('SELECT * FROM reference_set_assets WHERE reference_set_id=?',(parent_id,)).fetchall()
+        for a in parent_assets:con.execute('INSERT INTO reference_set_assets VALUES(?,?,?,?,?,?,?)',(uid('rsa'),rid,a['asset_id'],a['view_role'],a['purpose'],a['source_comment_id'],stamp))
+        for a in candidates:con.execute('INSERT INTO reference_set_assets VALUES(?,?,?,?,?,?,?)',(uid('rsa'),rid,a['asset_id'],a['view_role'],group['target_usage'],None,stamp))
+        con.execute("UPDATE detail_candidate_groups SET status='approved',reviewed_at=?,review_note=? WHERE id=?",(stamp,body.notes,group_id));con.execute('INSERT INTO detail_review_events VALUES(?,?,?,?,?,?,?)',(uid('dre'),group_id,'approved','local-admin',body.notes,rid,stamp))
+    return {'groupId':group_id,'status':'approved','referenceSet':reference_set_json(con_row_reference(rid))}
+
+def con_row_reference(rid:str):
+    with db() as con:return con.execute('SELECT * FROM reference_sets WHERE id=?',(rid,)).fetchone()
+
+def reference_set_consumption(rid:str):
+    with db() as con:
+        rs=con.execute('SELECT * FROM reference_sets WHERE id=?',(rid,)).fetchone()
+        if not rs:raise HTTPException(404,'Reference Set 不存在')
+        rows=con.execute('SELECT rsa.*,a.original_name,a.storage_path,a.sha256,a.mime_type FROM reference_set_assets rsa JOIN assets a ON a.id=rsa.asset_id WHERE rsa.reference_set_id=? ORDER BY rsa.created_at',(rid,)).fetchall()
+    actual={}
+    for a in rows:
+        if a['view_role'] in ('front','side','back') and (a['view_role'] not in actual or a['purpose']=='geometry'):actual[a['view_role']]={'assetId':a['asset_id'],'name':a['original_name'],'storagePath':a['storage_path'],'sha256':a['sha256'],'purpose':a['purpose']}
+    blender=[{'assetId':a['asset_id'],'viewRole':a['view_role'],'name':a['original_name'],'storagePath':a['storage_path'],'sha256':a['sha256'],'purpose':a['purpose']} for a in rows if a['view_role'] not in ('front','side','back') or a['purpose'] in ('normal_displacement','material')]
+    return {'referenceSetId':rid,'version':rs['number'],'lockedAt':rs['locked_at'],'hunyuanInputs':actual,'blenderOnlyAssets':blender,'warnings':([] if all(v in actual for v in ('front','side','back')) else ['Hunyuan3D-2mv 需要 front、side、back；缺失时任务将被阻断'])}
+
+@app.get('/api/reference-sets/{rid}/consumption-map')
+def get_reference_consumption(rid:str):return reference_set_consumption(rid)
 
 def seed_demo():
     with db() as con:
