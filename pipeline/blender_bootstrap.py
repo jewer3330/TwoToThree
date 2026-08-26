@@ -4,8 +4,11 @@ import sys
 
 import bpy
 
-WORKSPACE = r"C:\Users\vip\Documents\3d"
-ADDON_SOURCE = os.path.join(WORKSPACE, ".local", "blender-mcp-server", "addon")
+WORKSPACE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, WORKSPACE)
+from studio_paths import LOCAL_ROOT
+
+ADDON_SOURCE = str(LOCAL_ROOT / "blender-mcp-server" / "addon")
 ADDON_TARGET = os.path.join(bpy.utils.user_resource("SCRIPTS"), "addons", "blender_mcp_bridge")
 GLB_PATH = os.path.join(WORKSPACE, "public", "models", "field-commander.glb")
 BLEND_PATH = os.path.join(WORKSPACE, "field-commander", "field-commander-sf3d.blend")

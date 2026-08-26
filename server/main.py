@@ -1,36 +1,38 @@
 from __future__ import annotations
-import asyncio, json, mimetypes, os, random, shutil, threading
+import asyncio, json, mimetypes, os, random, re, shutil, threading
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any,Literal
 import psutil
 from fastapi import FastAPI,File,HTTPException,Query,Request,UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse,Response,StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from PIL import Image,UnidentifiedImageError
+from PIL import Image,ImageDraw,UnidentifiedImageError
 from pydantic import BaseModel,Field
-from .core import DATA,ROOT,db,dump,init_db,load,now,project_dir,rowdict,sha256,slugify,uid
+from .core import DATA,ROOT,db,dump,init_db,load,now,project_dir,resolve_storage,rowdict,sha256,slugify,storage_path,uid
 from .worker import STAGES,launch
-from .backends import capabilities,refine_blender,generate_hunyuan,CancelledError
+from .backends import capabilities,refine_blender,generate_hunyuan,generate_hunyuan_multiview,export_stl_blender,BackendError,CancelledError
 from .detail_provider import generate as generate_detail_candidate,stop_server as stop_detail_server
+from .style_presets import DEFAULT_STYLE, public_style_presets, style_preset
 
 @asynccontextmanager
 async def lifespan(_:FastAPI):
     init_db();seed_demo();yield
 
 app=FastAPI(title='2D→3D Studio API',version='1.0.0',docs_url='/api/docs',openapi_url='/api/openapi.json',lifespan=lifespan)
+mimetypes.add_type('model/gltf-binary','.glb')
 app.add_middleware(CORSMiddleware,allow_origins=['http://localhost:5173','http://127.0.0.1:5173'],allow_methods=['*'],allow_headers=['*'])
 
 class ProjectInput(BaseModel):
-    name:str=Field(min_length=1,max_length=60);subjectType:str='character';intendedUse:str='web';quality:str='standard';segmentationRequired:bool=False;rigRequired:bool=False;preserveFeatures:str='';notes:str=''
+    name:str=Field(min_length=1,max_length=60);subjectType:str='character';intendedUse:str='web';quality:str='standard';modelStyle:Literal['realistic','cartoon','chibi']=DEFAULT_STYLE;visualConditioningMode:Literal['auto','original','contour','rgb_depth']='auto';segmentationRequired:bool=False;rigRequired:bool=False;preserveFeatures:str='';notes:str=''
 class PatchInput(BaseModel):
-    name:str|None=None;subjectType:str|None=None;intendedUse:str|None=None;quality:str|None=None;segmentationRequired:bool|None=None;rigRequired:bool|None=None;preserveFeatures:str|None=None;notes:str|None=None
+    name:str|None=None;subjectType:str|None=None;intendedUse:str|None=None;quality:str|None=None;modelStyle:Literal['realistic','cartoon','chibi']|None=None;visualConditioningMode:Literal['auto','original','contour','rgb_depth']|None=None;segmentationRequired:bool|None=None;rigRequired:bool|None=None;preserveFeatures:str|None=None;notes:str|None=None
 class DecisionInput(BaseModel):notes:str=''
 class RefinementInput(BaseModel):
-    sourceVersionId:str;modules:list[str]=['geometryRepair','uvUnwrap','pbrMaterials','webOptimization','visualReview'];instructions:str='';geometryRepairStrength:str='conservative';uvStrategy:str='preserve_or_smart';uvIslandMargin:float=.03;materialTemplate:str='neutral';targetTriangleRange:list[int]=[20000,120000];textureResolution:int=2048;maxWebGlbMB:int=20
+    sourceVersionId:str;modules:list[str]=['geometryRepair','uvUnwrap','pbrMaterials','webOptimization','visualReview'];instructions:str='';geometryRepairStrength:str='conservative';uvStrategy:str='preserve_or_smart';uvIslandMargin:float=.03;materialTemplate:str='neutral';targetTriangleRange:list[int]=[20000,120000];textureResolution:int=2048;maxWebGlbMB:int=20;preserveThickness:bool=True;maxThicknessLoss:float=Field(default=.08,ge=0,le=.5);maxDecimationPerPass:float=Field(default=.2,ge=.05,le=.5);minThinAxisRatio:float=Field(default=.08,ge=.01,le=.5)
 class PlanInput(BaseModel):
-    primaryBackend:str='hunyuan3d';fallbackBackends:list[str]=['sf3d','triposr'];geometryQuality:str='standard';textureResolution:int=0;faceRefinement:bool=False;targetTriangleRange:list[int]=[60000,120000];segmentationRequired:bool=False;rigRequired:bool=False;preserveBaseline:bool=True;renderViews:list[str]=['front','left-three-quarter','side','back'];viewWeights:dict[str,float]=Field(default_factory=lambda:{'front':1.8,'side':1.0,'back':0.7});limitations:list[str]=[];referenceSetId:str|None=None
+    primaryBackend:str='hunyuan3d';fallbackBackends:list[str]=['sf3d','triposr'];geometryQuality:str='standard';textureResolution:int=0;faceRefinement:bool=False;targetTriangleRange:list[int]=[60000,120000];segmentationRequired:bool=False;rigRequired:bool=False;preserveBaseline:bool=True;renderViews:list[str]=['front','left-three-quarter','side','back'];modelStyle:Literal['realistic','cartoon','chibi']=DEFAULT_STYLE;stylePreset:dict=Field(default_factory=lambda:style_preset(DEFAULT_STYLE));viewWeights:dict[str,float]=Field(default_factory=lambda:{'front':1.8,'side':1.0,'back':0.7});visualConditioning:dict=Field(default_factory=lambda:{'enabled':True,'mode':'auto','depthBlend':.15,'exportExperimentalDepth':True});limitations:list[str]=[];referenceSetId:str|None=None
 class CommentInput(BaseModel):
     title:str=Field(min_length=1,max_length=120);description:str=Field(min_length=1,max_length=4000);category:str='other';severity:str='normal';recommendedRoute:str='reference_regeneration';meshName:str|None=None;position:dict|None=None;normal:dict|None=None;cameraSnapshot:dict|None=None;screenshotDataUrl:str|None=None
 class CommentPatch(BaseModel):
@@ -43,6 +45,101 @@ class DetailPlanInput(BaseModel):mode:str='balanced'
 class DetailRegionPatch(BaseModel):selected:bool|None=None;mode:str|None=None;targetUsage:str|None=None;constraints:dict|None=None
 class DetailJobInput(BaseModel):candidateCount:int=Field(default=2,ge=1,le=4);seed:int|None=None
 class DetailReviewInput(BaseModel):notes:str=''
+class StlExportInput(BaseModel):
+    filename:str=Field(default='model.stl',min_length=1,max_length=100)
+    scope:Literal['all','visible']='visible'
+    unit:Literal['mm','cm','m']='mm'
+    applyModifiers:bool=True
+    targetHeightMm:float|None=Field(default=None,ge=1,le=2000)
+class PartGenerationInput(BaseModel):
+    partId:Literal['head','hair','braid-left','braid-right','torso','arms','feet']
+    overlap:int=Field(default=10,ge=3,le=18)
+    quality:Literal['standard','high']='standard'
+    seed:int|None=None
+
+PART_BOXES={
+    'head':{'front':(.10,.02,.90,.66),'side':(.14,.03,.88,.70),'back':(.05,.02,.95,.67)},
+    'hair':{'front':(.04,.01,.96,.70),'side':(.10,.02,.94,.76),'back':(.02,.01,.98,.72)},
+    'braid-left':{'front':(.01,.43,.34,.98),'side':(.55,.39,.98,.99),'back':(.01,.38,.34,.98)},
+    'braid-right':{'front':(.66,.43,.99,.98),'side':(.02,.39,.45,.99),'back':(.66,.38,.99,.98)},
+    'torso':{'front':(.18,.48,.82,.98),'side':(.22,.50,.78,.97),'back':(.14,.46,.86,.98)},
+    'arms':{'front':(.08,.50,.92,.90),'side':(.16,.50,.84,.90),'back':(.07,.49,.93,.90)},
+    'feet':{'front':(.30,.84,.70,1.0),'side':(.27,.83,.73,1.0),'back':(.29,.84,.71,1.0)},
+}
+PART_POLYGONS={
+    'braid-left':{
+        'front':[(.105,.50),(.17,.47),(.225,.55),(.225,.91),(.17,.965),(.115,.88)],
+        'side':[(.58,.46),(.66,.42),(.765,.48),(.755,.91),(.68,.965),(.59,.84)],
+        'back':[(.09,.46),(.15,.43),(.225,.49),(.225,.89),(.17,.95),(.105,.84)],
+    },
+    'braid-right':{
+        'front':[(.93,.46),(.81,.43),(.73,.53),(.74,.94),(.83,.99),(.90,.88)],
+        'side':[(.40,.36),(.22,.34),(.10,.45),(.12,.91),(.27,.97),(.40,.82)],
+        'back':[(.93,.39),(.82,.37),(.72,.46),(.73,.91),(.82,.98),(.91,.86)],
+    },
+}
+_part_jobs:dict[str,dict[str,Any]]={}
+_part_jobs_lock=threading.RLock()
+
+def _part_job_json(job:dict[str,Any])->dict[str,Any]:
+    return {k:v for k,v in job.items() if k not in ('cancelled',)}
+
+def _prepare_part_conditions(part_id:str,overlap:int,out_dir:Path)->dict[str,Path]:
+    source={'front':ROOT/'views'/'正面图.png','side':ROOT/'views'/'左侧面图.png','back':ROOT/'views'/'背面图.png'}
+    out_dir.mkdir(parents=True,exist_ok=True);result={}
+    expansion=overlap/100*.06
+    for role,path in source.items():
+        with Image.open(path) as raw:
+            image=raw.convert('RGBA');w,h=image.size;x0,y0,x1,y1=PART_BOXES[part_id][role]
+            x0=max(0,x0-expansion);y0=max(0,y0-expansion);x1=min(1,x1+expansion);y1=min(1,y1+expansion)
+            bounds=(round(x0*w),round(y0*h),round(x1*w),round(y1*h));crop=image.crop(bounds)
+            polygon=PART_POLYGONS.get(part_id,{}).get(role)
+            if polygon:
+                full_mask=Image.new('L',(w,h),0);draw=ImageDraw.Draw(full_mask)
+                draw.polygon([(round(x*w),round(y*h)) for x,y in polygon],fill=255)
+                mask=full_mask.crop(bounds);source_alpha=crop.getchannel('A')
+                crop.putalpha(Image.composite(mask,Image.new('L',mask.size,0),source_alpha))
+            canvas=Image.new('RGBA',(1024,1024),(255,255,255,0));crop.thumbnail((920,920),Image.Resampling.LANCZOS)
+            canvas.alpha_composite(crop,((1024-crop.width)//2,(1024-crop.height)//2))
+            target=out_dir/f'{role}.png';canvas.save(target);result[role]=target
+    return result
+
+def _run_part_job(job_id:str,body:PartGenerationInput):
+    with _part_jobs_lock:
+        job=_part_jobs[job_id];job.update(status='preparing',progress=8,message='正在生成三视图部件条件图')
+    root=DATA/'parts'/'jobs'/job_id
+    try:
+        images=_prepare_part_conditions(body.partId,body.overlap,root/'conditions')
+        with _part_jobs_lock:job.update(status='generating',progress=18,message='Hunyuan3D-2mv 正在生成独立部件')
+        def log_line(message:str):
+            with _part_jobs_lock:
+                job['logs'].append(message);job['logs']=job['logs'][-80:]
+                if '100%' in message:job['progress']=88
+                elif job['progress']<82:job['progress']=min(82,job['progress']+2)
+                job['message']=message[-160:]
+        output=root/'candidate.glb'
+        result=generate_hunyuan_multiview(images,output,job['seed'],body.quality,{'front':1.8,'side':1.2,'back':1.0},log_line,lambda:False,{'enabled':True,'mode':'original','depthBlend':.15},'chibi')
+        with _part_jobs_lock:job.update(status='completed',progress=100,message='候选部件 GLB 已生成',candidateUrl=f'/data/parts/jobs/{job_id}/candidate.glb',result=result,completedAt=now())
+    except Exception as exc:
+        with _part_jobs_lock:job.update(status='failed',message=str(exc),error=str(exc),completedAt=now())
+
+@app.post('/api/parts/jobs',status_code=202)
+def create_part_job(body:PartGenerationInput):
+    if not capabilities().get('hunyuan3dMultiview'):raise HTTPException(503,'本机 Hunyuan3D-2mv 不可用')
+    job_id=uid('part');job={'id':job_id,'partId':body.partId,'status':'queued','progress':2,'message':'任务已进入本地 GPU 队列','candidateUrl':None,'seed':body.seed if body.seed is not None else random.randint(1,2**31-1),'logs':[],'createdAt':now()}
+    with _part_jobs_lock:_part_jobs[job_id]=job
+    threading.Thread(target=_run_part_job,args=(job_id,body),daemon=True,name=f'part-{job_id}').start()
+    return _part_job_json(job)
+
+@app.get('/api/parts/jobs/{job_id}')
+def get_part_job(job_id:str):
+    with _part_jobs_lock:job=_part_jobs.get(job_id)
+    if not job:
+        if not re.fullmatch(r'part_[a-f0-9]{16}',job_id):raise HTTPException(404,'部件生成任务不存在')
+        candidate=DATA/'parts'/'jobs'/job_id/'candidate.glb'
+        if candidate.exists():return {'id':job_id,'partId':'unknown','status':'completed','progress':100,'message':'已从磁盘恢复候选部件 GLB','candidateUrl':f'/data/parts/jobs/{job_id}/candidate.glb','logs':['API 重启后从持久化产物恢复']}
+        raise HTTPException(404,'部件生成任务不存在或尚无持久化产物')
+    return _part_job_json(job)
 
 DETAIL_REGION_SPECS={
     'head':('geometry',['front','side','back']),'face':('material',['front','left-three-quarter','right-three-quarter']),
@@ -57,12 +154,12 @@ EVIDENCE_LEVELS={'observed','constrained','inferred','designed'}
 DETAIL_USAGES={'geometry','normal_displacement','material'}
 
 def project_json(r):
-    d=dict(r);stage=None
+    d=dict(r);stage=None;settings=load(d['settings'],{})
     if d['current_job_id']:
         with db() as con:
             job=con.execute('SELECT current_stage FROM jobs WHERE id=?',(d['current_job_id'],)).fetchone()
             stage=job['current_stage'] if job else None
-    return {'id':d['id'],'slug':d['slug'],'name':d['name'],'subjectType':d['subject_type'],'intendedUse':d['intended_use'],'quality':d['quality'],'status':d['status'],'currentJobId':d['current_job_id'],'currentStage':stage,'passedStages':d['passed_stages'],'totalStages':d['total_stages'],'actualBackend':d['actual_backend'],'thumbnailUrl':d['thumbnail_url'],'createdAt':d['created_at'],'updatedAt':d['updated_at']}
+    return {'id':d['id'],'slug':d['slug'],'name':d['name'],'subjectType':d['subject_type'],'intendedUse':d['intended_use'],'quality':d['quality'],'modelStyle':settings.get('modelStyle',DEFAULT_STYLE),'visualConditioningMode':settings.get('visualConditioningMode','auto'),'status':d['status'],'currentJobId':d['current_job_id'],'baseVersionId':d['base_version_id'],'currentStage':stage,'passedStages':d['passed_stages'],'totalStages':d['total_stages'],'actualBackend':d['actual_backend'],'thumbnailUrl':d['thumbnail_url'],'createdAt':d['created_at'],'updatedAt':d['updated_at']}
 def asset_json(r):
     d=dict(r);return {'id':d['id'],'role':d['role'],'originalName':d['original_name'],'mimeType':d['mime_type'],'byteSize':d['byte_size'],'width':d['width'],'height':d['height'],'sha256':d['sha256'],'active':bool(d['active']),'url':'/'+d['storage_path'].replace('\\','/')}
 def artifact_json(r):
@@ -80,6 +177,8 @@ def health():
         gpu_name=subprocess.check_output(['nvidia-smi','--query-gpu=name','--format=csv,noheader'],text=True,timeout=4,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0)).strip();gpu_ok=bool(gpu_name)
     except Exception:pass
     return {'status':'healthy' if gpu_ok and caps['hunyuan3d'] and caps['blender'] else 'degraded','cpu':psutil.cpu_percent(),'memory':psutil.virtual_memory().percent,'storage':disk.percent,'gpu':{'status':'ready' if gpu_ok else 'unavailable','name':gpu_name,'queueConcurrency':1},'backends':caps,'services':{'api':'online','database':'online','worker':'local-thread'}}
+@app.get('/api/style-presets')
+def style_presets():return public_style_presets()
 @app.get('/api/projects')
 def projects(status:str|None=None,query:str|None=None,sort:str='updated_at',page:int=1):
     sql='SELECT * FROM projects';args=[];where=[]
@@ -170,7 +269,7 @@ async def upload_asset(pid:str,role:str=Query(...),file:UploadFile=File(...)):
             with Image.open(tmp) as im:width,height=im.size;fmt=(im.format or '').lower()
             mime={'png':'image/png','jpeg':'image/jpeg','webp':'image/webp'}.get(fmt,'')
             if not mime:raise HTTPException(415,'图片实际内容类型不受支持')
-        final=target_dir/f'{aid}{ext}';tmp.replace(final);digest=sha256(final);rel=final.relative_to(ROOT).as_posix()
+        final=target_dir/f'{aid}{ext}';tmp.replace(final);digest=sha256(final);rel=storage_path(final)
         with db() as con:
             con.execute('UPDATE assets SET active=0 WHERE project_id=? AND role=?',(pid,role));con.execute('INSERT INTO assets VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',(aid,pid,role,safe_name,rel,mime,size,width,height,digest,1,now()));con.execute("UPDATE projects SET status='uploading',updated_at=? WHERE id=?",(now(),pid));con.execute('DELETE FROM validations WHERE project_id=?',(pid,))
             if role=='front':con.execute('UPDATE projects SET thumbnail_url=? WHERE id=?',('/'+rel,pid))
@@ -213,12 +312,12 @@ def accept_risks(pid:str):
     with db() as con:con.execute('UPDATE validations SET accepted_at=? WHERE project_id=?',(stamp,pid));con.execute("UPDATE projects SET status='awaiting_confirmation',updated_at=? WHERE id=?",(stamp,pid))
     v['acceptedAt']=stamp;return v
 def make_plan(pid):
-    p=get_project(pid);settings=load(p['settings'],{});quality=p['quality'];texture_resolution={'standard':0,'high':2048,'ultra':4096}.get(quality,0);return {'primaryBackend':'hunyuan3d','fallbackBackends':['sf3d','triposr'],'geometryQuality':quality,'textureResolution':texture_resolution,'faceRefinement':quality=='ultra','targetTriangleRange':[60000,120000],'segmentationRequired':settings.get('segmentationRequired',False),'rigRequired':settings.get('rigRequired',False),'preserveBaseline':True,'renderViews':['front','left-three-quarter','side','back'],'viewWeights':{'front':1.8,'side':1.0,'back':0.7},'limitations':['单张图无法准确恢复隐藏面；背面与遮挡结构按证据置信度标记。','高/超高质量使用参考图投射保留颜色与五官；它不会把二维眼线自动雕刻成独立眼球。','自动分件与骨骼不作为 MVP 完成条件。']}
+    p=get_project(pid);settings=load(p['settings'],{});quality=p['quality'];preset=style_preset(settings.get('modelStyle'));texture_resolution={'standard':0,'high':2048,'ultra':4096}.get(quality,0);visual_mode=settings.get('visualConditioningMode','auto');return {'primaryBackend':'hunyuan3d','fallbackBackends':['sf3d','triposr'],'geometryQuality':quality,'textureResolution':texture_resolution,'faceRefinement':quality=='ultra','targetTriangleRange':[60000,120000],'segmentationRequired':settings.get('segmentationRequired',False),'rigRequired':settings.get('rigRequired',False),'preserveBaseline':True,'renderViews':['front','left-three-quarter','side','back'],'modelStyle':preset['id'],'stylePreset':preset,'viewWeights':preset['viewWeights'],'visualConditioning':{'enabled':visual_mode!='original','mode':visual_mode,'depthBlend':.15,'exportExperimentalDepth':True},'limitations':['Hunyuan3D-2mv 不直接接收文本提示词；风格提示词会转成安全的 RGB 轮廓/明暗候选。','纯深度提示不直接送入 Hunyuan，仅作为实验产物保存。','风格预设会实际控制三视图权重及 Blender 前后厚度。','单张图无法准确恢复隐藏面；背面与遮挡结构按证据置信度标记。','高/超高质量使用参考图投射保留颜色与五官；它不会把二维眼线自动雕刻成独立眼球。','自动分件与骨骼不作为 MVP 完成条件。']}
 @app.get('/api/projects/{pid}/plan')
 def get_plan(pid:str):return make_plan(pid)
 @app.patch('/api/projects/{pid}/plan')
 def update_plan(pid:str,body:PlanInput):
-    get_project(pid);path=project_dir(pid)/'plan-draft.json';path.write_text(json.dumps(body.model_dump(),ensure_ascii=False,indent=2),encoding='utf-8');return body.model_dump()
+    get_project(pid);payload=body.model_dump();payload['stylePreset']=style_preset(payload['modelStyle']);path=project_dir(pid)/'plan-draft.json';path.write_text(json.dumps(payload,ensure_ascii=False,indent=2),encoding='utf-8');return payload
 @app.post('/api/projects/{pid}/jobs',status_code=201)
 def create_job(pid:str):
     p=get_project(pid)
@@ -293,7 +392,8 @@ def version_json(vid):
         if not r:raise HTTPException(404,'版本不存在')
         art=con.execute("SELECT * FROM artifacts WHERE version_id=? AND type='glb' ORDER BY created_at DESC LIMIT 1",(vid,)).fetchone()
         if not art:art=con.execute("SELECT * FROM refinement_artifacts WHERE version_id=? AND type='glb' ORDER BY created_at DESC LIMIT 1",(vid,)).fetchone()
-    return {'id':r['id'],'projectId':r['project_id'],'number':r['number'],'label':r['label'],'status':r['status'],'model':artifact_json(art) if art else None,'createdAt':r['created_at'],'qualityReport':load(r['quality_report'],{})}
+        project=con.execute('SELECT base_version_id FROM projects WHERE id=?',(r['project_id'],)).fetchone()
+    return {'id':r['id'],'projectId':r['project_id'],'number':r['number'],'label':r['label'],'status':r['status'],'isBase':project['base_version_id']==vid,'model':artifact_json(art) if art else None,'createdAt':r['created_at'],'qualityReport':load(r['quality_report'],{})}
 @app.get('/api/versions/{vid}')
 def version(vid:str):return version_json(vid)
 @app.get('/api/versions/{vid}/model')
@@ -303,6 +403,59 @@ def model(vid:str):
     return v['model']
 @app.get('/api/versions/{vid}/quality-report')
 def quality(vid:str):return version_json(vid)['qualityReport']
+@app.post('/api/versions/{vid}/exports/stl')
+def export_version_stl(vid:str,body:StlExportInput):
+    version=version_json(vid);safe_stem=re.sub(r'[^\w\-\u4e00-\u9fff]+','-',Path(body.filename).stem,flags=re.UNICODE).strip('-') or f'version-{version["number"]:03d}'
+    with db() as con:
+        source=con.execute("SELECT * FROM refinement_artifacts WHERE version_id=? AND type IN ('blend','glb') ORDER BY CASE type WHEN 'blend' THEN 0 ELSE 1 END,created_at DESC LIMIT 1",(vid,)).fetchone()
+        if not source:source=con.execute("SELECT * FROM artifacts WHERE version_id=? AND type IN ('blend','glb') ORDER BY CASE type WHEN 'blend' THEN 0 ELSE 1 END,created_at DESC LIMIT 1",(vid,)).fetchone()
+        if not source:source=con.execute("SELECT * FROM assets WHERE project_id=? AND role='existing-model' AND active=1 AND (storage_path LIKE '%.blend' OR storage_path LIKE '%.glb') ORDER BY CASE WHEN storage_path LIKE '%.blend' THEN 0 ELSE 1 END,created_at DESC LIMIT 1",(version['projectId'],)).fetchone()
+    if not source:raise HTTPException(404,'当前版本没有可供 Blender 导出的 .blend 或 GLB 源文件')
+    source_path=resolve_storage(source['storage_path']);output=project_dir(version['projectId'])/'versions'/vid/'exports'/f'{safe_stem}.stl'
+    logs=[]
+    try:export_stl_blender(source_path,output,body.scope,body.unit,body.applyModifiers,logs.append,body.targetHeightMm)
+    except BackendError as exc:raise HTTPException(500,str(exc)) from exc
+    rel=storage_path(output)
+    return {'filename':output.name,'url':'/'+rel.replace('\\','/'),'byteSize':output.stat().st_size,'sourceType':source_path.suffix.lower().lstrip('.'),'engine':'Blender','unit':body.unit,'targetHeightMm':body.targetHeightMm,'logs':logs[-10:]}
+@app.post('/api/versions/{vid}/set-base')
+def set_base_version(vid:str):
+    version=version_json(vid)
+    with db() as con:con.execute('UPDATE projects SET base_version_id=?,updated_at=? WHERE id=?',(vid,now(),version['projectId']))
+    return version_json(vid)
+@app.delete('/api/versions/{vid}',status_code=204)
+def delete_version(vid:str):
+    version=version_json(vid);pid=version['projectId']
+    with db() as con:
+        if con.execute('SELECT 1 FROM projects WHERE id=? AND base_version_id=?',(pid,vid)).fetchone():raise HTTPException(409,'Base 版本不能删除；请先将另一个版本设为 Base')
+        if con.execute("SELECT 1 FROM jobs WHERE version_id=? AND status NOT IN ('completed','failed','cancelled')",(vid,)).fetchone():raise HTTPException(409,'该版本仍有处理中的生成任务，暂不能删除')
+        if con.execute('SELECT 1 FROM refinement_jobs WHERE source_version_id=?',(vid,)).fetchone() or con.execute('SELECT 1 FROM revision_requests WHERE source_version_id=?',(vid,)).fetchone():raise HTTPException(409,'该版本正被后续修订使用，不能删除')
+        if con.execute('SELECT 1 FROM reference_set_assets rsa JOIN comment_attachments ca ON ca.asset_id=rsa.asset_id JOIN version_comments vc ON vc.id=ca.comment_id WHERE vc.version_id=?',(vid,)).fetchone():raise HTTPException(409,'该版本的 Comment 参考图正在被 Reference Set 使用，不能删除')
+        comment_assets=[r['id'] for r in con.execute("SELECT a.id FROM assets a JOIN comment_attachments ca ON ca.asset_id=a.id JOIN version_comments vc ON vc.id=ca.comment_id WHERE vc.version_id=?",(vid,))]
+        comment_files=[r['storage_path'] for r in con.execute("SELECT a.storage_path FROM assets a JOIN comment_attachments ca ON ca.asset_id=a.id JOIN version_comments vc ON vc.id=ca.comment_id WHERE vc.version_id=?",(vid,))]
+        comment_files += [r['screenshot_path'] for r in con.execute('SELECT screenshot_path FROM version_comments WHERE version_id=? AND screenshot_path IS NOT NULL',(vid,))]
+        own_refinement_ids=[r['id'] for r in con.execute('SELECT id FROM refinement_jobs WHERE output_version_id=?',(vid,))]
+        own_revision_ids=[r['id'] for r in con.execute('SELECT id FROM revision_requests WHERE output_version_id=?',(vid,))]
+        if own_refinement_ids and con.execute("SELECT 1 FROM refinement_jobs WHERE output_version_id=? AND status IN ('queued','running')",(vid,)).fetchone():raise HTTPException(409,'该版本对应的精修任务仍在运行，暂不能删除')
+        if own_revision_ids and con.execute("SELECT 1 FROM revision_requests WHERE output_version_id=? AND status IN ('queued','running','processing')",(vid,)).fetchone():raise HTTPException(409,'该版本对应的修订任务仍在运行，暂不能删除')
+        con.execute('DELETE FROM comment_replies WHERE comment_id IN (SELECT id FROM version_comments WHERE version_id=?)',(vid,))
+        con.execute('DELETE FROM comment_attachments WHERE comment_id IN (SELECT id FROM version_comments WHERE version_id=?)',(vid,))
+        if comment_assets:con.executemany('DELETE FROM assets WHERE id=?',[(asset_id,) for asset_id in comment_assets])
+        con.execute('DELETE FROM version_comments WHERE version_id=?',(vid,))
+        con.execute('DELETE FROM revision_comment_links WHERE revision_request_id IN (SELECT id FROM revision_requests WHERE output_version_id=?)',(vid,))
+        con.execute('DELETE FROM revision_requests WHERE output_version_id=?',(vid,))
+        con.execute('DELETE FROM version_links WHERE refinement_job_id IN (SELECT id FROM refinement_jobs WHERE output_version_id=?)',(vid,))
+        con.execute('DELETE FROM refinement_artifacts WHERE refinement_job_id IN (SELECT id FROM refinement_jobs WHERE output_version_id=?)',(vid,))
+        con.execute('DELETE FROM refinement_jobs WHERE output_version_id=?',(vid,))
+        con.execute('DELETE FROM stages WHERE job_id IN (SELECT id FROM jobs WHERE version_id=?)',(vid,))
+        con.execute('DELETE FROM events WHERE job_id IN (SELECT id FROM jobs WHERE version_id=?)',(vid,))
+        con.execute('DELETE FROM artifacts WHERE version_id=?',(vid,))
+        con.execute('DELETE FROM decisions WHERE version_id=?',(vid,));con.execute('DELETE FROM revisions WHERE version_id=?',(vid,));con.execute('DELETE FROM jobs WHERE version_id=?',(vid,));con.execute('DELETE FROM versions WHERE id=?',(vid,))
+        con.execute('UPDATE projects SET current_job_id=NULL,updated_at=? WHERE id=? AND current_job_id NOT IN (SELECT id FROM jobs)',(now(),pid))
+    shutil.rmtree(project_dir(pid)/'versions'/vid,ignore_errors=True)
+    for path in comment_files:
+        try:resolve_storage(path).unlink(missing_ok=True)
+        except OSError:pass
+    return Response(status_code=204)
 @app.post('/api/versions/{vid}/accept')
 def accept(vid:str,body:DecisionInput):return decide(vid,'completed',body.notes)
 @app.post('/api/versions/{vid}/accept-with-notes')
@@ -370,21 +523,21 @@ def run_refinement(jid):
         for m in config['modules']:
             cap=REFINEMENT_MODULES[m]['capability'];states[m]='running' if cap in ('automatic','inferred') else 'not_configured'
         with db() as con:con.execute('UPDATE refinement_jobs SET module_states=? WHERE id=?',(dump(states),jid))
-        result=refine_blender(ROOT/source['storage_path'],root,config_path,save_log,cancelled,ROOT/reference['storage_path'] if reference else None)
+        result=refine_blender(resolve_storage(source['storage_path']),root,config_path,save_log,cancelled,resolve_storage(reference['storage_path']) if reference else None)
         for m in config['modules']:
             cap=REFINEMENT_MODULES[m]['capability'];states[m]='awaiting_review' if cap=='inferred' else 'passed' if cap=='automatic' else 'not_configured'
         gates=result.get('gates',{})
-        if not gates.get('meshValid',False) or not gates.get('boundsSafe',False):states['geometryRepair']='failed'
+        if not gates.get('meshValid',False) or not gates.get('boundsSafe',False) or not gates.get('volumeSafe',True):states['geometryRepair']='failed'
         if 'uvUnwrap' in states and not gates.get('uvValid',False):states['uvUnwrap']='failed'
         if 'pbrMaterials' in states and not gates.get('pbrComplete',False):states['pbrMaterials']='failed'
-        if 'webOptimization' in states and (not gates.get('triangleBudget',False) or not gates.get('sizeBudget',False) or not gates.get('glbValid',False)):states['webOptimization']='failed'
+        if 'webOptimization' in states and (not gates.get('triangleBudget',False) or not gates.get('sizeBudget',False) or not gates.get('glbValid',False) or not gates.get('volumeSafe',True)):states['webOptimization']='failed'
         if 'visualReview' in states and not gates.get('rendersComplete',False):states['visualReview']='failed'
         stamp=now();status='awaiting_review' if result['status']=='passed' else 'quality_failed'
         with db() as con:
             con.execute('INSERT INTO versions VALUES(?,?,?,?,?,?,?)',(out_vid,d['project_id'],number,f'v{number:03d} · Blender 自动精修','ready_for_review' if status=='awaiting_review' else 'quality_failed',dump(result),stamp));con.execute('INSERT INTO version_links VALUES(?,?,?,?,?)',(uid('vln'),d['source_version_id'],out_vid,jid,stamp))
             files=[('glb','refined.glb',root/'refined.glb','model/gltf-binary'),('quality_report','quality-report.json',root/'quality-report.json','application/json'),('config','config-snapshot.json',config_path,'application/json')]+[('texture',f'{n}.png',root/'textures'/f'{n}.png','image/png') for n in ('base-color','roughness','metallic','normal','ao')]+[('render',f'{n}.png',root/f'{n}.png','image/png') for n in ('front','left-three-quarter','side','back')]
             for kind,label,path,mime in files:
-                if path.exists():con.execute('INSERT INTO refinement_artifacts VALUES(?,?,?,?,?,?,?,?,?,?,?)',(uid('rart'),jid,out_vid,kind,label,path.relative_to(ROOT).as_posix(),mime,path.stat().st_size,sha256(path),dump({'sourceVersionId':d['source_version_id']}),stamp))
+                if path.exists():con.execute('INSERT INTO refinement_artifacts VALUES(?,?,?,?,?,?,?,?,?,?,?)',(uid('rart'),jid,out_vid,kind,label,storage_path(path),mime,path.stat().st_size,sha256(path),dump({'sourceVersionId':d['source_version_id']}),stamp))
             con.execute('UPDATE refinement_jobs SET output_version_id=?,status=?,module_states=?,logs=?,completed_at=?,blender_version=?,quality_report=? WHERE id=?',(out_vid,status,dump(states),dump(logs),stamp,result.get('blenderVersion'),dump(result),jid));con.execute('UPDATE projects SET status=?,updated_at=? WHERE id=?',('ready_for_review' if status=='awaiting_review' else 'quality_failed',stamp,d['project_id']))
     except CancelledError as exc:
         with db() as con:con.execute("UPDATE refinement_jobs SET status='cancelled',logs=?,completed_at=?,error_summary=? WHERE id=?",(dump(logs),now(),str(exc),jid))
@@ -434,7 +587,7 @@ def create_comment(vid:str,body:CommentInput):
             if 'image/png' not in header:raise ValueError()
             raw=base64.b64decode(data,validate=True)
             if len(raw)>10*1024*1024:raise ValueError()
-            target=project_dir(version['projectId'])/'comments';target.mkdir(parents=True,exist_ok=True);path=target/f'{cid}.png';path.write_bytes(raw);screenshot=path.relative_to(ROOT).as_posix()
+            target=project_dir(version['projectId'])/'comments';target.mkdir(parents=True,exist_ok=True);path=target/f'{cid}.png';path.write_bytes(raw);screenshot=storage_path(path)
         except ValueError:raise HTTPException(422,'截图必须是小于 10MB 的 PNG data URL')
     with db() as con:
         number=con.execute('SELECT COALESCE(MAX(number),0)+1 FROM version_comments WHERE project_id=?',(version['projectId'],)).fetchone()[0]
@@ -492,7 +645,7 @@ async def comment_attachment(cid:str,viewRole:str=Query(...),purpose:str=Query('
     if not mime:path.unlink(missing_ok=True);raise HTTPException(415,'图片格式不受支持')
     stamp=now();link=uid('cat')
     with db() as con:
-        con.execute('INSERT INTO assets VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',(aid,row['project_id'],f'comment-{viewRole}',safe,path.relative_to(ROOT).as_posix(),mime,len(raw),w,h,sha256(path),1,stamp))
+        con.execute('INSERT INTO assets VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',(aid,row['project_id'],f'comment-{viewRole}',safe,storage_path(path),mime,len(raw),w,h,sha256(path),1,stamp))
         con.execute('INSERT INTO comment_attachments VALUES(?,?,?,?,?,?)',(link,cid,aid,viewRole,purpose,stamp))
     return comment_json(get_comment(cid))
 
@@ -562,15 +715,15 @@ def run_revision(rid):
         if not capabilities().get('hunyuan3d'):raise RuntimeError('真实 Hunyuan3D 环境未配置，任务不会使用模拟产物')
         if not capabilities().get('blenderRefinement'):raise RuntimeError('真实 Blender 自动精修环境未配置')
         root=project_dir(r['project_id'])/'revisions'/rid;root.mkdir(parents=True,exist_ok=True);raw=root/'hunyuan-candidate.glb';seed=int(config.get('seed',random.randint(1,2**31-1)));quality=config.get('quality','standard')
-        generate_hunyuan(ROOT/asset['storage_path'],raw,seed,quality,log,cancelled)
-        refdir=root/'blender';refdir.mkdir();cfg={'modules':['geometryRepair','uvUnwrap','pbrMaterials','webOptimization','visualReview'],'instructions':'Reference Set candidate post-processing','geometryRepairStrength':'conservative','uvStrategy':'preserve_or_smart','uvIslandMargin':.03,'materialTemplate':'neutral','targetTriangleRange':[20000,120000],'textureResolution':2048,'maxWebGlbMB':20};cfg_path=root/'blender-config.json';cfg_path.write_text(json.dumps(cfg,ensure_ascii=False),encoding='utf-8');result=refine_blender(raw,refdir,cfg_path,log,cancelled,ROOT/asset['storage_path'])
+        generate_hunyuan(resolve_storage(asset['storage_path']),raw,seed,quality,log,cancelled)
+        refdir=root/'blender';refdir.mkdir();cfg={'modules':['geometryRepair','uvUnwrap','pbrMaterials','webOptimization','visualReview'],'instructions':'Reference Set candidate post-processing','geometryRepairStrength':'conservative','uvStrategy':'preserve_or_smart','uvIslandMargin':.03,'materialTemplate':'neutral','targetTriangleRange':[20000,120000],'textureResolution':2048,'maxWebGlbMB':20,'preserveThickness':True,'maxThicknessLoss':.08,'maxDecimationPerPass':.2,'minThinAxisRatio':.08};cfg_path=root/'blender-config.json';cfg_path.write_text(json.dumps(cfg,ensure_ascii=False),encoding='utf-8');result=refine_blender(raw,refdir,cfg_path,log,cancelled,resolve_storage(asset['storage_path']))
         out=uid('ver');stamp=now();status='awaiting_review' if result.get('status')=='passed' else 'quality_failed'
         with db() as con:
             con.execute('INSERT INTO versions VALUES(?,?,?,?,?,?,?)',(out,r['project_id'],number,f'v{number:03d} · Reference Set 候选重生成','ready_for_review' if status=='awaiting_review' else 'quality_failed',dump(result),stamp))
             jid=uid('ref');con.execute('INSERT INTO refinement_jobs(id,project_id,source_version_id,output_version_id,status,config,module_states,logs,created_at,started_at,completed_at,blender_version,quality_report) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',(jid,r['project_id'],r['source_version_id'],out,status,dump(cfg),dump({m:'passed' for m in cfg['modules']}),dump(logs),r['created_at'],r['started_at'],stamp,result.get('blenderVersion'),dump(result)));con.execute('INSERT INTO version_links VALUES(?,?,?,?,?)',(uid('vln'),r['source_version_id'],out,jid,stamp))
             files=[('glb','candidate-refined.glb',refdir/'refined.glb','model/gltf-binary')]+[('render',f'{v}.png',refdir/f'{v}.png','image/png') for v in ('front','left-three-quarter','side','back')]
             for kind,label,path,mime in files:
-                if path.exists():con.execute('INSERT INTO refinement_artifacts VALUES(?,?,?,?,?,?,?,?,?,?,?)',(uid('rart'),jid,out,kind,label,path.relative_to(ROOT).as_posix(),mime,path.stat().st_size,sha256(path),dump({'revisionRequestId':rid}),stamp))
+                if path.exists():con.execute('INSERT INTO refinement_artifacts VALUES(?,?,?,?,?,?,?,?,?,?,?)',(uid('rart'),jid,out,kind,label,storage_path(path),mime,path.stat().st_size,sha256(path),dump({'revisionRequestId':rid}),stamp))
             con.execute('UPDATE revision_requests SET output_version_id=?,status=?,completed_at=? WHERE id=?',(out,status,stamp,rid));con.execute('UPDATE revision_comment_links SET output_version_id=? WHERE revision_request_id=?',(out,rid));con.execute("UPDATE version_comments SET status='awaiting_review',updated_at=? WHERE id IN (SELECT comment_id FROM revision_comment_links WHERE revision_request_id=?)",(stamp,rid))
     except CancelledError as exc:
         with db() as con:con.execute("UPDATE revision_requests SET status='cancelled',completed_at=?,error_summary=? WHERE id=?",(now(),str(exc),rid));con.execute("UPDATE version_comments SET status='open',updated_at=? WHERE id IN (SELECT comment_id FROM revision_comment_links WHERE revision_request_id=?)",(now(),rid))
@@ -719,8 +872,8 @@ def run_detail_job(job_id:str):
                 message=f"生成 {group['region_key']} · 候选组 {group['group_index']} · {view}"
                 with db() as con:con.execute('UPDATE detail_generation_jobs SET current_message=? WHERE id=?',(message,job_id))
                 log(message)
-                source=sources[view];seed=int(job['seed'])+group['group_index']*100+len(generated);output=root/group['region_key']/f"group-{group['group_index']}"/f'{view}.png';meta=generate_detail_candidate(ROOT/source['storage_path'],group['region_key'],view,output,seed,denoise,log,cancelled)
-                aid=uid('ast');stamp=now();rel=output.relative_to(ROOT).as_posix()
+                source=sources[view];seed=int(job['seed'])+group['group_index']*100+len(generated);output=root/group['region_key']/f"group-{group['group_index']}"/f'{view}.png';meta=generate_detail_candidate(resolve_storage(source['storage_path']),group['region_key'],view,output,seed,denoise,log,cancelled)
+                aid=uid('ast');stamp=now();rel=storage_path(output)
                 with Image.open(output) as im:width,height=im.size
                 with db() as con:
                     con.execute('INSERT INTO assets VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',(aid,job['project_id'],'detail-candidate',output.name,rel,'image/png',output.stat().st_size,width,height,sha256(output),0,stamp))

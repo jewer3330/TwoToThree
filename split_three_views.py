@@ -1,4 +1,5 @@
 from pathlib import Path
+from studio_paths import OUTPUT_ROOT
 
 from PIL import Image, ImageChops, ImageOps
 
@@ -7,7 +8,7 @@ SOURCES = [
     Path(r"C:\Users\vip\Desktop\2886196_20251012185030473223_0.jpg"),
     Path(r"C:\Users\vip\Desktop\3786496_20251206233102218200_0.jpg"),
 ]
-OUTPUT_DIR = Path(r"C:\Users\vip\Documents\3d\output\three_views_512x1024")
+OUTPUT_DIR = OUTPUT_ROOT / "three_views_512x1024"
 VIEW_NAMES = ("front", "side", "back")
 CANVAS_SIZE = (512, 1024)
 

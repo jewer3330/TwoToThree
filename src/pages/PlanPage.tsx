@@ -21,20 +21,56 @@ const flow = [
   ["材质处理", Layers3],
   ["网页优化", FileBox],
 ] as const;
-const viewLabels: Record<string, string> = { front: "正面", side: "侧面", back: "背面" };
-function ViewWeightSlider({ role, value, onChange }: { role: string; value: number; onChange: (value: number) => void }) {
-  return <label className="view-weight"><span>{viewLabels[role]}权重 <b>{value.toFixed(1)}</b></span><input type="range" min="0.1" max="3" step="0.1" value={value} onChange={(e) => onChange(Number(e.target.value))}/><small>0.1</small><small>3.0</small></label>;
+const viewLabels: Record<string, string> = {
+  front: "正面",
+  side: "侧面",
+  back: "背面",
+};
+function ViewWeightSlider({
+  role,
+  value,
+  onChange,
+}: {
+  role: string;
+  value: number;
+  onChange: (value: number) => void;
+}) {
+  return (
+    <label className="view-weight">
+      <span>
+        {viewLabels[role]}权重 <b>{value.toFixed(1)}</b>
+      </span>
+      <input
+        type="range"
+        min="0.1"
+        max="3"
+        step="0.1"
+        value={value}
+        onChange={(e) => onChange(Number(e.target.value))}
+      />
+      <small>0.1</small>
+      <small>3.0</small>
+    </label>
+  );
 }
 export default function PlanPage() {
   const { projectId = "" } = useParams(),
     nav = useNavigate();
   const [plan, setPlan] = useState<any>();
-  const [consumption,setConsumption]=useState<any>();
+  const [consumption, setConsumption] = useState<any>();
   const [error, setError] = useState("");
   useEffect(() => {
     api
       .plan(projectId)
-      .then(async (value:any)=>{const referenceSetId=new URLSearchParams(location.search).get('referenceSetId');const next={...value,referenceSetId:referenceSetId||undefined};setPlan(next);if(referenceSetId)setConsumption(await api.referenceConsumption(referenceSetId))})
+      .then(async (value: any) => {
+        const referenceSetId = new URLSearchParams(location.search).get(
+          "referenceSetId",
+        );
+        const next = { ...value, referenceSetId: referenceSetId || undefined };
+        setPlan(next);
+        if (referenceSetId)
+          setConsumption(await api.referenceConsumption(referenceSetId));
+      })
       .catch((e) => setError(e.message));
   }, [projectId]);
   const setQuality = (geometryQuality: string) =>
@@ -140,7 +176,31 @@ export default function PlanPage() {
               </span>
             ))}
           </div>
-          {consumption&&<div className="panel outputs"><h2>Reference Set 实际消费映射</h2>{Object.entries(consumption.hunyuanInputs).map(([role,item]:any)=><span key={role}><CheckCircle2/>{role} → Hunyuan3D-2mv · {item.name} · {item.sha256.slice(0,12)}</span>)}{consumption.blenderOnlyAssets.map((item:any)=><span key={`${item.assetId}-${item.purpose}`}><Layers3/>{item.viewRole} → 仅 Blender/{item.purpose} · {item.name}</span>)}{consumption.warnings.map((warning:string)=><div className="notice danger" key={warning}>{warning}</div>)}</div>}
+          {consumption && (
+            <div className="panel outputs">
+              <h2>Reference Set 实际消费映射</h2>
+              {Object.entries(consumption.hunyuanInputs).map(
+                ([role, item]: any) => (
+                  <span key={role}>
+                    <CheckCircle2 />
+                    {role} → Hunyuan3D-2mv · {item.name} ·{" "}
+                    {item.sha256.slice(0, 12)}
+                  </span>
+                ),
+              )}
+              {consumption.blenderOnlyAssets.map((item: any) => (
+                <span key={`${item.assetId}-${item.purpose}`}>
+                  <Layers3 />
+                  {item.viewRole} → 仅 Blender/{item.purpose} · {item.name}
+                </span>
+              ))}
+              {consumption.warnings.map((warning: string) => (
+                <div className="notice danger" key={warning}>
+                  {warning}
+                </div>
+              ))}
+            </div>
+          )}
         </section>
         <aside>
           <div className="panel risk-panel">
@@ -192,11 +252,86 @@ export default function PlanPage() {
                 disabled
               />
             </label>
-          <div className="view-weight-group"><h3>三视图权重</h3><p>提高正面权重可增强脸部条件，过高可能削弱侧面和背面轮廓。</p>{(["front", "side", "back"] as const).map((role) => <ViewWeightSlider key={role} role={role} value={plan.viewWeights?.[role] ?? ({ front: 1.8, side: 1, back: 0.7 }[role])} onChange={(value) => setPlan({ ...plan, viewWeights: { ...plan.viewWeights, [role]: value } })}/>)}</div>
-          <label className="check">
-            <input
-              type="checkbox"
-              checked={plan.segmentationRequired}
+            <div className="style-prompt-preview">
+              <b>模型风格 · {plan.stylePreset?.label || plan.modelStyle}</b>
+              <p>{plan.stylePreset?.featurePrompt}</p>
+              <small>反向约束：{plan.stylePreset?.negativePrompt}</small>
+            </div>
+            <label>
+              三视图视觉增强
+              <select
+                value={plan.visualConditioning?.mode || "auto"}
+                onChange={(e) =>
+                  setPlan({
+                    ...plan,
+                    visualConditioning: {
+                      ...plan.visualConditioning,
+                      enabled: e.target.value !== "original",
+                      mode: e.target.value,
+                    },
+                  })
+                }
+              >
+                <option value="auto">
+                  自动：写实保留原图，卡通/Q版强化轮廓
+                </option>
+                <option value="original">关闭：使用规范化原图</option>
+                <option value="contour">轮廓强化 RGB（推荐）</option>
+                <option value="rgb_depth">RGB＋弱深度明暗（实验）</option>
+              </select>
+            </label>
+            {plan.visualConditioning?.mode === "rgb_depth" && (
+              <label>
+                深度明暗混合{" "}
+                <b>
+                  {Math.round(
+                    (plan.visualConditioning?.depthBlend ?? 0.15) * 100,
+                  )}
+                  %
+                </b>
+                <input
+                  type="range"
+                  min="0.05"
+                  max="0.25"
+                  step="0.05"
+                  value={plan.visualConditioning?.depthBlend ?? 0.15}
+                  onChange={(e) =>
+                    setPlan({
+                      ...plan,
+                      visualConditioning: {
+                        ...plan.visualConditioning,
+                        depthBlend: Number(e.target.value),
+                      },
+                    })
+                  }
+                />
+                <small>纯深度图只保存为实验产物，不直接送入 Hunyuan。</small>
+              </label>
+            )}
+            <div className="view-weight-group">
+              <h3>三视图权重</h3>
+              <p>提高正面权重可增强脸部条件，过高可能削弱侧面和背面轮廓。</p>
+              {(["front", "side", "back"] as const).map((role) => (
+                <ViewWeightSlider
+                  key={role}
+                  role={role}
+                  value={
+                    plan.viewWeights?.[role] ??
+                    { front: 1.8, side: 1, back: 0.7 }[role]
+                  }
+                  onChange={(value) =>
+                    setPlan({
+                      ...plan,
+                      viewWeights: { ...plan.viewWeights, [role]: value },
+                    })
+                  }
+                />
+              ))}
+            </div>
+            <label className="check">
+              <input
+                type="checkbox"
+                checked={plan.segmentationRequired}
                 onChange={(e) =>
                   setPlan({ ...plan, segmentationRequired: e.target.checked })
                 }

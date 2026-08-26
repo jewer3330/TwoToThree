@@ -1,7 +1,7 @@
 from __future__ import annotations
 import json, math, struct, threading, time
 from pathlib import Path
-from .core import ROOT,db,dump,now,project_dir,sha256,uid
+from .core import ROOT,db,dump,now,project_dir,resolve_storage,sha256,storage_path,uid
 from .backends import BackendError,CancelledError,capabilities,generate_hunyuan,generate_hunyuan_multiview,generate_sf3d,generate_triposr,render_blender
 
 STAGES=[('intake','素材接收'),('analysis','主体分析'),('geometry','几何生成'),('glb_validation','GLB 检查'),('multi_view_render','Blender 标准化与四视图'),('web_optimization','Web GLB 输出')]
@@ -42,7 +42,7 @@ def glb_geometry_metrics(path:Path)->dict:
     robust=[q(v,.95)-q(v,.05) for v in axes];ordered=sorted(robust);ratio=ordered[0]/max(ordered[-1],1e-9)
     return {'vertexCount':len(axes[0]),'robustDimensions':{'x':robust[0],'y':robust[1],'z':robust[2]},'thinAxisRatio':ratio,'flat':ratio<.08}
 def add_artifact(job,kind,label,path:Path,mime,metadata=None):
-    aid=uid('art');rel=path.relative_to(ROOT).as_posix()
+    aid=uid('art');rel=storage_path(path)
     with db() as con:con.execute('INSERT INTO artifacts VALUES(?,?,?,?,?,?,?,?,?,?,?)',(aid,job['id'],job['version_id'],kind,label,rel,mime,path.stat().st_size,sha256(path),dump(metadata or {}),now()))
     emit(job['id'],'stage.output',{'artifactId':aid,'type':kind,'label':label})
 def report(job,stage,status,started,warnings=None,error=None,next_action=None):
@@ -66,7 +66,7 @@ def run(job_id:str):
                 for item in consumption.get('blenderOnlyAssets',[]):
                     row=con.execute('SELECT * FROM assets WHERE id=? AND project_id=?',(item['assetId'],job['project_id'])).fetchone()
                     if not row or row['sha256']!=item['sha256']:raise ValueError(f"Blender 细节资产 {item['assetId']} 缺失或哈希不一致")
-                    if item['purpose']=='material' and item['viewRole'] in ('front','side','back'):blender_references[item['viewRole']]=ROOT/row['storage_path']
+                    if item['purpose']=='material' and item['viewRole'] in ('front','side','back'):blender_references[item['viewRole']]=resolve_storage(row['storage_path'])
                     else:deferred_detail_assets.append(item)
             log(job_id,f"读取锁定 Reference Set {consumption['referenceSetId']}；Hunyuan 实际输入={sorted(by_role)}；Blender 专用资产={len(consumption.get('blenderOnlyAssets',[]))}")
         else:
@@ -74,7 +74,7 @@ def run(job_id:str):
             by_role={a['role']:a for a in assets}
         asset=by_role.get('front')
         if not asset:raise ValueError('缺少正面素材')
-        source_image=ROOT/asset['storage_path'];source_images={role:ROOT/a['storage_path'] for role,a in by_role.items()};version_root=project_dir(job['project_id'])/'versions'/job['version_id']
+        source_image=resolve_storage(asset['storage_path']);source_images={role:resolve_storage(a['storage_path']) for role,a in by_role.items()};version_root=project_dir(job['project_id'])/'versions'/job['version_id']
         emit(job_id,'job.status',{'status':'running'});log(job_id,'Worker 已领取任务；资源类型 gpu，单任务串行执行')
         for index,(key,label) in enumerate(STAGES):
             with db() as con:existing=con.execute('SELECT status FROM stages WHERE job_id=? AND stage_key=?',(job_id,key)).fetchone()
@@ -96,7 +96,7 @@ def run(job_id:str):
                     if not available.get(backend):errors.append(f'{backend}: environment unavailable');continue
                     try:
                         if backend=='hunyuan3d':
-                            if len(source_images)>1:result=generate_hunyuan_multiview(source_images,out,job['seed'],config.get('geometryQuality','standard'),config.get('viewWeights',{'front':1.8,'side':1.0,'back':0.7}),lambda m:log(job_id,m),lambda:should_cancel(job_id))
+                            if len(source_images)>1:result=generate_hunyuan_multiview(source_images,out,job['seed'],config.get('geometryQuality','standard'),config.get('viewWeights',{'front':1.8,'side':1.0,'back':0.7}),lambda m:log(job_id,m),lambda:should_cancel(job_id),config.get('visualConditioning'),config.get('modelStyle','realistic'))
                             else:result=generate_hunyuan(source_image,out,job['seed'],config.get('geometryQuality','standard'),lambda m:log(job_id,m),lambda:should_cancel(job_id))
                         elif backend=='sf3d':result=generate_sf3d(source_image,out,config.get('textureResolution',2048),lambda m:log(job_id,m),lambda:should_cancel(job_id))
                         elif backend=='triposr':result=generate_triposr(source_image,out,lambda m:log(job_id,m),lambda:should_cancel(job_id))
@@ -112,6 +112,12 @@ def run(job_id:str):
                 for role,path_text in result.get('processedImages',{}).items():
                     path=Path(path_text)
                     if path.exists():add_artifact(job,'condition-image',f'实际送入 Hunyuan3D-2mv：{role}',path,'image/png',{'role':role,'backgroundRemoved':True,'foregroundCropped':True,'multiView':True})
+                for role,variants in result.get('visualCandidates',{}).items():
+                    for variant,path_text in variants.items():
+                        path=Path(path_text)
+                        if path.exists():add_artifact(job,'visual-condition',f'{role} · {variant}',path,'image/png',{'role':role,'variant':variant,'selected':variant==result.get('visualConditioning',{}).get('selectedMode'),'experimental':variant=='depth-cue-experimental'})
+                visual_report=Path(result['visualConditioningReport']) if result.get('visualConditioningReport') else None
+                if visual_report and visual_report.exists():add_artifact(job,'quality_report','三视图视觉增强报告',visual_report,'application/json',{'selectedMode':result.get('visualConditioning',{}).get('selectedMode')})
             elif key=='glb_validation':
                 metrics=glb_geometry_metrics(version_root/'models'/'baseline.glb')
                 log(job_id,f"稳健包围尺寸={metrics['robustDimensions']}；厚度比={metrics['thinAxisRatio']:.4f}")
@@ -126,12 +132,13 @@ def run(job_id:str):
                 for role,path in blender_references.items():references[role]=path
                 if blender_references:log(job_id,f'Blender 使用已批准材质候选视图：{sorted(blender_references)}')
                 if deferred_detail_assets:log(job_id,f'记录 {len(deferred_detail_assets)} 个局部/法线细节资产；当前阶段不伪装为已烘焙，将转入局部精修')
-                render_sources=render_blender(baseline,outdir,web_glb,lambda m:log(job_id,m),lambda:should_cancel(job_id),quality,texture_resolution,references)
-                add_artifact(job,'glb','web.glb',web_glb,'model/gltf-binary',{'backend':job['actual_backend'],'normalizedBy':'Blender 5.2','source':'baseline.glb','quality':quality,'geometryResolution':{'standard':256,'high':384,'ultra':512}[quality],'textureResolution':texture_resolution or None,'faceRefinement':quality=='ultra'})
+                style=config.get('stylePreset',{'id':config.get('modelStyle','realistic'),'depthScale':1.0})
+                render_sources=render_blender(baseline,outdir,web_glb,lambda m:log(job_id,m),lambda:should_cancel(job_id),quality,texture_resolution,references,style)
+                add_artifact(job,'glb','web.glb',web_glb,'model/gltf-binary',{'backend':job['actual_backend'],'normalizedBy':'Blender 5.2','source':'baseline.glb','quality':quality,'modelStyle':style.get('id','realistic'),'styleFeaturePrompt':style.get('featurePrompt',''),'depthScale':style.get('depthScale',1.0),'geometryResolution':{'standard':256,'high':384,'ultra':512}[quality],'textureResolution':texture_resolution or None,'faceRefinement':quality=='ultra'})
                 for view,source in render_sources.items():add_artifact(job,'render',view,source,'image/png',{'view':view,'renderer':'Blender 5.2'})
                 for texture in sorted((outdir/'textures').glob('*.png')):add_artifact(job,'texture',texture.name,texture,'image/png',{'resolution':texture_resolution,'projection':'multi-view','embeddedIn':'web.glb'})
             path=report(job,key,'passed',started,warnings=warnings,next_action=STAGES[index+1][0] if index+1<len(STAGES) else 'ready_for_review')
-            with db() as con:con.execute("UPDATE stages SET status='passed',completed_at=?,report_path=? WHERE job_id=? AND stage_key=?",(now(),path.relative_to(ROOT).as_posix(),job_id,key));con.execute('UPDATE projects SET passed_stages=?,updated_at=? WHERE id=?',(index+1,now(),job['project_id']))
+            with db() as con:con.execute("UPDATE stages SET status='passed',completed_at=?,report_path=? WHERE job_id=? AND stage_key=?",(now(),storage_path(path),job_id,key));con.execute('UPDATE projects SET passed_stages=?,updated_at=? WHERE id=?',(index+1,now(),job['project_id']))
             emit(job_id,'stage.completed',{'stage':key,'status':'passed','warnings':warnings})
             if key=='multi_view_render':
                 metrics=glb_geometry_metrics(version_root/'models'/'baseline.glb')

@@ -13,9 +13,12 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-COMFY = ROOT / ".local" / "ComfyUI"
+sys.path.insert(0, str(ROOT))
+from studio_paths import LOCAL_ROOT
+
+COMFY = LOCAL_ROOT / "ComfyUI"
 LOCAL_SITE = COMFY / ".venv-gpu" / "Lib" / "site-packages"
-TORCH_SITE = ROOT / ".local" / "stable-fast-3d" / ".venv-runtime" / "Lib" / "site-packages"
+TORCH_SITE = LOCAL_ROOT / "stable-fast-3d" / ".venv-runtime" / "Lib" / "site-packages"
 
 for path in (str(LOCAL_SITE), str(TORCH_SITE)):
     while path in sys.path:

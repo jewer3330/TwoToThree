@@ -1,4 +1,4 @@
-import {Activity, ArrowLeft, Boxes, ChevronRight, Cpu, FolderKanban, Gauge, HardDrive, Home, Layers3, Menu, Plus, Search, Settings, Sparkles} from 'lucide-react';
+import {Activity, ArrowLeft, Boxes, ChevronRight, Cpu, FolderKanban, Gauge, HardDrive, Home, Layers3, Menu, Plus, Scissors, Search, Settings, Sparkles} from 'lucide-react';
 import {Link, NavLink, Navigate, Route, Routes, useLocation, useNavigate} from 'react-router-dom';
 import Dashboard from './pages/Dashboard';
 import CreateProject from './pages/CreateProject';
@@ -12,14 +12,21 @@ import RevisionPlanPage from './pages/RevisionPlanPage';
 import RevisionMonitorPage from './pages/RevisionMonitorPage';
 import DetailPlanPage from './pages/DetailPlanPage';
 import DetailJobPage from './pages/DetailJobPage';
+import PartsLabPage from './pages/PartsLabPage';
+import PartsGeneratePage from './pages/PartsGeneratePage';
+import PartsAssemblyPage from './pages/PartsAssemblyPage';
+import PartsComparePage from './pages/PartsComparePage';
 
-const nav=[['/',Home,'工作台'],['/projects',FolderKanban,'项目管理'],['/assets',Layers3,'素材管理'],['/queue',Activity,'任务队列'],['/library',Boxes,'模型 / 资产库'],['/settings',Settings,'系统设置']] as const;
+const nav=[['/',Home,'工作台'],['/projects',FolderKanban,'项目管理'],['/parts-lab',Scissors,'部件切分实验'],['/assets',Layers3,'素材管理'],['/queue',Activity,'任务队列'],['/library',Boxes,'模型 / 资产库'],['/settings',Settings,'系统设置']] as const;
 function Placeholder({title}:{title:string}){return <div className="empty"><Boxes/><h2>{title}</h2><p>该入口将在后续版本开放，当前 MVP 聚焦完整转换与验收流程。</p></div>}
 const pageNames: Array<[RegExp,string]> = [
   [/^\/create$/, '新建项目'], [/^\/validation\//, '素材校验'], [/^\/plan\//, '方案确认'],
   [/^\/jobs\//, '生成任务'], [/^\/review\//, '预览验收'], [/^\/refinement\/new\//, '优化配置'],
   [/^\/refinement\/jobs\//, '优化任务'], [/^\/revisions\/new\//, '修订方案'], [/^\/revisions\//, '修订任务'],
   [/^\/detail-plans\//, 'AI 细节规划'], [/^\/detail-jobs\//, 'AI 候选任务'],
+  [/^\/parts-lab$/, '三视图部件切分实验'],
+  [/^\/parts-lab\/generate\//, '部件条件生成'],
+  [/^\/parts-lab\/assembly\//, '部件基线装配'], [/^\/parts-lab\/compare\//, '部件 A/B 验收'],
   [/^\/projects$/, '项目管理'], [/^\/assets$/, '素材管理'], [/^\/queue$/, '任务队列'],
   [/^\/library$/, '模型 / 资产库'], [/^\/settings$/, '系统设置'],
 ];
@@ -45,6 +52,11 @@ function Shell(){const loc=useLocation(); const focused=/\/(create|validation|pl
     <Route path="/refinement/new/:versionId" element={<RefinementConfigPage/>}/><Route path="/refinement/jobs/:jobId" element={<RefinementMonitorPage/>}/>
     <Route path="/revisions/new/:versionId" element={<RevisionPlanPage/>}/><Route path="/revisions/:revisionId" element={<RevisionMonitorPage/>}/>
     <Route path="/detail-plans/:projectId" element={<DetailPlanPage/>}/><Route path="/detail-jobs/:jobId" element={<DetailJobPage/>}/>
+    <Route path="/parts-lab" element={<PartsLabPage/>}/>
+    <Route path="/parts-lab/generate/:partId" element={<PartsGeneratePage/>}/>
+    <Route path="/parts-lab/assembly/:partId" element={<PartsAssemblyPage/>}/>
+    <Route path="/parts-lab/compare/:partId" element={<PartsComparePage/>}/>
+    <Route path="/parts-lab/*" element={<PartsLabPage/>}/>
     <Route path="/projects" element={<Dashboard/>}/><Route path="/assets" element={<Placeholder title="素材管理"/>}/><Route path="/queue" element={<Placeholder title="任务队列"/>}/><Route path="/library" element={<Placeholder title="模型 / 资产库"/>}/><Route path="/settings" element={<Placeholder title="系统设置"/>}/><Route path="*" element={<Navigate to="/"/>}/>
   </Routes></main></section>
 </div>}

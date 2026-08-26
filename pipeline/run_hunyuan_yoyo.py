@@ -11,7 +11,10 @@ from PIL import Image
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE_ROOT = ROOT / ".local" / "Hunyuan3D-2.1-space" / "hy3dshape"
+sys.path.insert(0, str(ROOT))
+from studio_paths import LOCAL_ROOT  # noqa: E402
+
+SOURCE_ROOT = LOCAL_ROOT / "Hunyuan3D-2.1-space" / "hy3dshape"
 sys.path.insert(0, str(SOURCE_ROOT))
 
 from hy3dshape.pipelines import Hunyuan3DDiTFlowMatchingPipeline  # noqa: E402
@@ -21,7 +24,7 @@ from hy3dshape.rembg import BackgroundRemover  # noqa: E402
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--image", type=Path, default=ROOT / "public" / "yoyo-reference.png")
-    parser.add_argument("--model", type=Path, default=ROOT / ".local" / "Hunyuan3D-2.1-model")
+    parser.add_argument("--model", type=Path, default=LOCAL_ROOT / "Hunyuan3D-2.1-model")
     parser.add_argument(
         "--output",
         type=Path,

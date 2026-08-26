@@ -1,9 +1,29 @@
 import time
 import shutil
+import pytest
 from io import BytesIO
 from PIL import Image
 from fastapi.testclient import TestClient
 from server.main import app
+
+
+@pytest.fixture(autouse=True)
+def remove_projects_created_by_test():
+    """Keep API tests from leaving projects and their files in the local studio."""
+    from server.core import db
+
+    with db() as con:
+        project_ids_before = {row['id'] for row in con.execute('SELECT id FROM projects')}
+
+    try:
+        yield
+    finally:
+        with db() as con:
+            created_ids = [row['id'] for row in con.execute('SELECT id FROM projects') if row['id'] not in project_ids_before]
+        with TestClient(app) as client:
+            for project_id in created_ids:
+                response = client.delete(f'/api/projects/{project_id}')
+                assert response.status_code in {204, 404}
 
 def image_bytes(size=(1024,1024)):
     out=BytesIO();Image.new('RGB',size,(42,70,100)).save(out,'PNG');return out.getvalue()
@@ -25,7 +45,7 @@ def test_project_validation_and_job_contract(monkeypatch,tmp_path):
         output_dir.mkdir(parents=True,exist_ok=True);shutil.copy2(source,output_dir/'refined.glb');(output_dir/'textures').mkdir()
         for name in ('base-color','roughness','metallic','normal','ao'):(output_dir/'textures'/f'{name}.png').write_bytes(image_bytes((4,4)))
         for name in ('front','left-three-quarter','side','back'):(output_dir/f'{name}.png').write_bytes(image_bytes((4,4)))
-        report={'status':'passed','blenderVersion':'test','gates':{'glbValid':True,'meshValid':True,'triangleBudget':True,'uvValid':True,'pbrComplete':True,'sizeBudget':True,'boundsSafe':True,'rendersComplete':True}};(output_dir/'quality-report.json').write_text(__import__('json').dumps(report),encoding='utf-8');return report
+        report={'status':'passed','blenderVersion':'test','gates':{'glbValid':True,'meshValid':True,'triangleBudget':True,'uvValid':True,'pbrComplete':True,'sizeBudget':True,'boundsSafe':True,'volumeSafe':True,'robustThicknessSafe':True,'sideSilhouetteSafe':True,'rendersComplete':True}};(output_dir/'quality-report.json').write_text(__import__('json').dumps(report),encoding='utf-8');return report
     monkeypatch.setattr(main,'capabilities',lambda:{'blenderRefinement':True});monkeypatch.setattr(main,'refine_blender',fake_refine)
     with TestClient(app) as client:
         created=client.post('/api/projects',json={'name':'API contract test','subjectType':'character','intendedUse':'web','quality':'standard'})
@@ -85,6 +105,25 @@ def test_rejects_fake_image():
         response=client.post(f'/api/projects/{pid}/assets?role=front',files={'file':('fake.png',b'not an image','image/png')})
         assert response.status_code==415
 
+def test_model_style_preset_is_persisted_and_applied_to_plan():
+    with TestClient(app) as client:
+        presets=client.get('/api/style-presets')
+        assert presets.status_code==200
+        assert {item['id'] for item in presets.json()}=={'realistic','cartoon','chibi'}
+        created=client.post('/api/projects',json={'name':'Chibi style contract','subjectType':'character','intendedUse':'web','quality':'standard','modelStyle':'chibi','visualConditioningMode':'contour'})
+        assert created.status_code==201
+        pid=created.json()['id']
+        assert created.json()['modelStyle']=='chibi'
+        assert created.json()['visualConditioningMode']=='contour'
+        plan=client.get(f'/api/projects/{pid}/plan')
+        assert plan.status_code==200
+        payload=plan.json()
+        assert payload['modelStyle']=='chibi'
+        assert payload['stylePreset']['depthScale']==.62
+        assert payload['viewWeights']=={'front':1.2,'side':2.2,'back':1.0}
+        assert payload['visualConditioning']=={'enabled':True,'mode':'contour','depthBlend':.15,'exportExperimentalDepth':True}
+        assert '扁平毛绒玩具' in payload['stylePreset']['featurePrompt']
+
 def test_resolution_thresholds():
     with TestClient(app) as client:
         for size,expected_status,expected_verdict in [((255,512),'fail','request_input'),((409,512),'warning','conditional'),((1024,1024),'pass','conditional')]:
@@ -139,6 +178,21 @@ def test_delete_project_removes_record_and_files():
         assert deleted.status_code==204
         assert client.get(f'/api/projects/{pid}').status_code==404
         assert not directory.exists()
+
+def test_version_can_be_marked_base_and_deleted_when_unreferenced():
+    from server.core import db,dump,now,uid
+    with TestClient(app) as client:
+        pid=client.post('/api/projects',json={'name':'Version actions','subjectType':'object','intendedUse':'web','quality':'standard'}).json()['id']
+        first,second=uid('ver'),uid('ver')
+        with db() as con:
+            con.execute('INSERT INTO versions VALUES(?,?,?,?,?,?,?)',(first,pid,1,'v001','completed',dump({}),now()))
+            con.execute('INSERT INTO versions VALUES(?,?,?,?,?,?,?)',(second,pid,2,'v002','completed',dump({}),now()))
+        base=client.post(f'/api/versions/{first}/set-base')
+        assert base.status_code==200 and base.json()['isBase'] is True
+        assert client.delete(f'/api/versions/{first}').status_code==409
+        assert client.delete(f'/api/versions/{second}').status_code==204
+        assert client.get(f'/api/versions/{second}').status_code==404
+        assert client.get(f'/api/projects/{pid}/versions').json()==[base.json()]
 
 def test_detail_plan_confirmation_and_candidate_gate(monkeypatch):
     import server.main as main
