@@ -6,8 +6,9 @@ from PIL import Image,ImageDraw
 import psutil
 from .core import ROOT
 from .backends import BackendError,CancelledError
+from studio_paths import LOCAL_ROOT
 
-COMFY=ROOT/'.local/ComfyUI';COMFY_PY=COMFY/'.venv-gpu/Scripts/python.exe';LAUNCHER=ROOT/'scripts/run_comfy_gpu.py';SERVER='http://127.0.0.1:8188';CHECKPOINT='sd-v1-5-inpainting.ckpt'
+COMFY=LOCAL_ROOT/'ComfyUI';COMFY_PY=COMFY/'.venv-gpu/Scripts/python.exe';LAUNCHER=ROOT/'scripts/run_comfy_gpu.py';SERVER='http://127.0.0.1:8188';CHECKPOINT='sd-v1-5-inpainting.ckpt'
 _server_process:subprocess.Popen|None=None
 _server_lock=threading.Lock()
 REGION_BOXES={

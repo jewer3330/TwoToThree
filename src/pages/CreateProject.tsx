@@ -1,8 +1,342 @@
-import {useEffect,useState} from 'react';import {ImagePlus,Save,ShieldCheck,UploadCloud} from 'lucide-react';import {useNavigate,useSearchParams} from 'react-router-dom';import {api} from '../api';import type {Asset} from '../types';import {Button,PageHeader} from '../App';
-const roles=[['front','正面主参考','必填'],['side','侧面','推荐'],['back','背面','推荐'],['left-three-quarter','左 3/4','推荐'],['right-three-quarter','右 3/4','推荐']] as const;
-function Slot({role,label,tag,projectId,asset,onUploaded}:{role:string;label:string;tag:string;projectId?:string;asset?:Asset;onUploaded:(a:Asset)=>void}){const [progress,setProgress]=useState(0),[err,setErr]=useState('');const upload=async(f?:File)=>{if(!f)return;if(!projectId){setErr('请先填写项目名称并保存草稿');return}setErr('');try{onUploaded(await api.upload(projectId,role,f,setProgress))}catch(e){setErr((e as Error).message)}};return <label className={`upload-slot ${asset?'filled':''}`}><input type="file" accept="image/png,image/jpeg,image/webp" onChange={e=>upload(e.target.files?.[0])}/>{asset?<><img src={asset.url}/><div><b>{label}</b><small>{asset.originalName}</small><span>{asset.width}×{asset.height} · {(asset.byteSize/1048576).toFixed(1)} MB</span></div></>:<><ImagePlus/><b>{label} <em>{tag}</em></b><small>点击或拖拽图片到此处</small><span>PNG / JPG / WEBP · ≤20MB</span></>}{progress>0&&progress<100&&<i style={{width:`${progress}%`}}/>}{err&&<mark>{err}</mark>}</label>}
-export default function CreateProject(){const [params]=useSearchParams(),nav=useNavigate();const [id,setId]=useState(params.get('id')||''),[assets,setAssets]=useState<Asset[]>([]),[form,setForm]=useState({name:'',subjectType:'character',intendedUse:'web',quality:'standard',segmentationRequired:false,rigRequired:false,preserveFeatures:'',notes:''}),[saving,setSaving]=useState(false),[error,setError]=useState('');useEffect(()=>{if(id){api.project(id).then(p=>setForm(f=>({...f,name:p.name,subjectType:p.subjectType,intendedUse:p.intendedUse,quality:p.quality})));api.assets(id).then(setAssets)}},[id]);const ensure=async()=>{if(id)return id;if(!form.name.trim())throw new Error('请先填写项目名称');const p=await api.createProject(form);setId(p.id);history.replaceState(null,'',`/create?id=${p.id}`);return p.id};const save=async()=>{setSaving(true);setError('');try{const pid=await ensure();await api.updateProject(pid,form)}catch(e){setError((e as Error).message)}finally{setSaving(false)}};const check=async()=>{try{const pid=await ensure();await api.updateProject(pid,form);if(!assets.some(a=>a.role==='front'&&a.active))throw new Error('请上传正面主参考图');nav(`/validation/${pid}`);await api.validate(pid)}catch(e){setError((e as Error).message)}};return <>
-<PageHeader eyebrow="步骤 1 / 3 · 上传素材" title="创建转换任务" description="为每个视角明确分配角色，系统不会依靠文件名猜测。"/>
-<div className="create-layout"><section className="panel upload-panel"><h2>上传视图参考</h2><p>正面为主输入；侧面和背面会显著降低隐藏区域推断风险。</p><div className="slots">{roles.map(([role,label,tag])=><Slot key={role} role={role} label={label} tag={tag} projectId={id||undefined} asset={assets.find(a=>a.role===role&&a.active)} onUploaded={a=>setAssets(x=>[...x.filter(v=>v.role!==a.role),a])}/>)}</div><h3>高级材质（可选）</h3><div className="material-slots">{['base-color','roughness','normal','metalness','mask'].map(r=><Slot key={r} role={r} label={r} tag="可选" projectId={id||undefined} asset={assets.find(a=>a.role===r&&a.active)} onUploaded={a=>setAssets(x=>[...x.filter(v=>v.role!==a.role),a])}/>)}</div></section>
-<aside className="panel form-panel"><h2>任务设置</h2><label>项目名称<input value={form.name} maxLength={60} placeholder="例如：星空信使" onChange={e=>setForm({...form,name:e.target.value})} onBlur={save}/></label><label>主体类型<select value={form.subjectType} onChange={e=>setForm({...form,subjectType:e.target.value})}><option value="character">角色</option><option value="object">物体</option><option value="hybrid">混合</option></select></label><label>最终用途<select value={form.intendedUse} onChange={e=>setForm({...form,intendedUse:e.target.value})}><option value="web">网页展示</option><option value="game">游戏</option><option value="animation">动画</option><option value="hero-render">英雄渲染</option></select></label><label>质量等级<div className="choice-row">{[['standard','标准'],['high','高'],['ultra','超高']].map(([v,l])=><button className={form.quality===v?'active':''} onClick={()=>setForm({...form,quality:v})} key={v}>{l}</button>)}</div></label><label className="check"><input type="checkbox" checked={form.segmentationRequired} onChange={e=>setForm({...form,segmentationRequired:e.target.checked})}/> 要求分件</label><label className="check"><input type="checkbox" checked={form.rigRequired} onChange={e=>setForm({...form,rigRequired:e.target.checked})}/> 需要骨骼（非完成条件）</label><label>必须保持的特征<textarea value={form.preserveFeatures} onChange={e=>setForm({...form,preserveFeatures:e.target.value})}/></label>{error&&<div className="notice danger">{error}</div>}</aside></div>
-<div className="sticky-actions"><Button kind="secondary" disabled={saving} onClick={save}><Save/> {saving?'保存中':'保存草稿'}</Button><span><ShieldCheck/> 文件将进行类型、内容、尺寸与哈希双重检查</span><Button onClick={check}><UploadCloud/> 检查素材</Button></div></>}
+import { useEffect, useState } from "react";
+import { ImagePlus, Save, ShieldCheck, UploadCloud } from "lucide-react";
+import { useNavigate, useSearchParams } from "react-router-dom";
+import { api } from "../api";
+import type { Asset, StylePreset } from "../types";
+import { Button, PageHeader } from "../App";
+const roles = [
+  ["front", "正面主参考", "必填"],
+  ["side", "侧面", "推荐"],
+  ["back", "背面", "推荐"],
+  ["left-three-quarter", "左 3/4", "推荐"],
+  ["right-three-quarter", "右 3/4", "推荐"],
+] as const;
+function Slot({
+  role,
+  label,
+  tag,
+  projectId,
+  asset,
+  onUploaded,
+}: {
+  role: string;
+  label: string;
+  tag: string;
+  projectId?: string;
+  asset?: Asset;
+  onUploaded: (a: Asset) => void;
+}) {
+  const [progress, setProgress] = useState(0),
+    [err, setErr] = useState("");
+  const upload = async (f?: File) => {
+    if (!f) return;
+    if (!projectId) {
+      setErr("请先填写项目名称并保存草稿");
+      return;
+    }
+    setErr("");
+    try {
+      onUploaded(await api.upload(projectId, role, f, setProgress));
+    } catch (e) {
+      setErr((e as Error).message);
+    }
+  };
+  return (
+    <label className={`upload-slot ${asset ? "filled" : ""}`}>
+      <input
+        type="file"
+        accept="image/png,image/jpeg,image/webp"
+        onChange={(e) => upload(e.target.files?.[0])}
+      />
+      {asset ? (
+        <>
+          <img src={asset.url} />
+          <div>
+            <b>{label}</b>
+            <small>{asset.originalName}</small>
+            <span>
+              {asset.width}×{asset.height} ·{" "}
+              {(asset.byteSize / 1048576).toFixed(1)} MB
+            </span>
+          </div>
+        </>
+      ) : (
+        <>
+          <ImagePlus />
+          <b>
+            {label} <em>{tag}</em>
+          </b>
+          <small>点击或拖拽图片到此处</small>
+          <span>PNG / JPG / WEBP · ≤20MB</span>
+        </>
+      )}
+      {progress > 0 && progress < 100 && (
+        <i style={{ width: `${progress}%` }} />
+      )}
+      {err && <mark>{err}</mark>}
+    </label>
+  );
+}
+export default function CreateProject() {
+  const [params] = useSearchParams(),
+    nav = useNavigate();
+  const [id, setId] = useState(params.get("id") || ""),
+    [assets, setAssets] = useState<Asset[]>([]),
+    [presets, setPresets] = useState<StylePreset[]>([]),
+    [form, setForm] = useState({
+      name: "",
+      subjectType: "character",
+      intendedUse: "web",
+      quality: "standard",
+      modelStyle: "realistic",
+      visualConditioningMode: "auto",
+      segmentationRequired: false,
+      rigRequired: false,
+      preserveFeatures: "",
+      notes: "",
+    }),
+    [saving, setSaving] = useState(false),
+    [error, setError] = useState("");
+  useEffect(() => {
+    api
+      .stylePresets()
+      .then(setPresets)
+      .catch((e) => setError(e.message));
+    if (id) {
+      api.project(id).then((p) =>
+        setForm((f) => ({
+          ...f,
+          name: p.name,
+          subjectType: p.subjectType,
+          intendedUse: p.intendedUse,
+          quality: p.quality,
+          modelStyle: p.modelStyle || "realistic",
+          visualConditioningMode: p.visualConditioningMode || "auto",
+        })),
+      );
+      api.assets(id).then(setAssets);
+    }
+  }, [id]);
+  const ensure = async () => {
+    if (id) return id;
+    if (!form.name.trim()) throw new Error("请先填写项目名称");
+    const p = await api.createProject(form);
+    setId(p.id);
+    history.replaceState(null, "", `/create?id=${p.id}`);
+    return p.id;
+  };
+  const save = async () => {
+    setSaving(true);
+    setError("");
+    try {
+      const pid = await ensure();
+      await api.updateProject(pid, form);
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setSaving(false);
+    }
+  };
+  const check = async () => {
+    try {
+      const pid = await ensure();
+      await api.updateProject(pid, form);
+      if (!assets.some((a) => a.role === "front" && a.active))
+        throw new Error("请上传正面主参考图");
+      nav(`/validation/${pid}`);
+      await api.validate(pid);
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
+  const activePreset = presets.find((p) => p.id === form.modelStyle);
+  return (
+    <>
+      <PageHeader
+        eyebrow="步骤 1 / 3 · 上传素材"
+        title="创建转换任务"
+        description="为每个视角明确分配角色，系统不会依靠文件名猜测。"
+      />
+      <div className="create-layout">
+        <section className="panel upload-panel">
+          <h2>上传视图参考</h2>
+          <p>正面为主输入；侧面和背面会显著降低隐藏区域推断风险。</p>
+          <div className="slots">
+            {roles.map(([role, label, tag]) => (
+              <Slot
+                key={role}
+                role={role}
+                label={label}
+                tag={tag}
+                projectId={id || undefined}
+                asset={assets.find((a) => a.role === role && a.active)}
+                onUploaded={(a) =>
+                  setAssets((x) => [...x.filter((v) => v.role !== a.role), a])
+                }
+              />
+            ))}
+          </div>
+          <h3>高级材质（可选）</h3>
+          <div className="material-slots">
+            {["base-color", "roughness", "normal", "metalness", "mask"].map(
+              (r) => (
+                <Slot
+                  key={r}
+                  role={r}
+                  label={r}
+                  tag="可选"
+                  projectId={id || undefined}
+                  asset={assets.find((a) => a.role === r && a.active)}
+                  onUploaded={(a) =>
+                    setAssets((x) => [...x.filter((v) => v.role !== a.role), a])
+                  }
+                />
+              ),
+            )}
+          </div>
+        </section>
+        <aside className="panel form-panel">
+          <h2>任务设置</h2>
+          <label>
+            项目名称
+            <input
+              value={form.name}
+              maxLength={60}
+              placeholder="例如：星空信使"
+              onChange={(e) => setForm({ ...form, name: e.target.value })}
+              onBlur={save}
+            />
+          </label>
+          <label>
+            主体类型
+            <select
+              value={form.subjectType}
+              onChange={(e) =>
+                setForm({ ...form, subjectType: e.target.value })
+              }
+            >
+              <option value="character">角色</option>
+              <option value="object">物体</option>
+              <option value="hybrid">混合</option>
+            </select>
+          </label>
+          <label>
+            最终用途
+            <select
+              value={form.intendedUse}
+              onChange={(e) =>
+                setForm({ ...form, intendedUse: e.target.value })
+              }
+            >
+              <option value="web">网页展示</option>
+              <option value="game">游戏</option>
+              <option value="animation">动画</option>
+              <option value="hero-render">英雄渲染</option>
+            </select>
+          </label>
+          <label>
+            模型风格
+            <div className="style-preset-grid">
+              {presets.map((p) => (
+                <button
+                  type="button"
+                  title={p.description}
+                  className={form.modelStyle === p.id ? "active" : ""}
+                  onClick={() => setForm({ ...form, modelStyle: p.id })}
+                  key={p.id}
+                >
+                  <b>{p.label}</b>
+                </button>
+              ))}
+            </div>
+          </label>
+          {activePreset && (
+            <details className="style-prompt-preview">
+              <summary>查看“{activePreset.label}”特征规则</summary>
+              <p>{activePreset.featurePrompt}</p>
+              <small>{activePreset.negativePrompt}</small>
+            </details>
+          )}
+          <label>
+            三视图视觉增强
+            <select
+              value={form.visualConditioningMode}
+              onChange={(e) =>
+                setForm({ ...form, visualConditioningMode: e.target.value })
+              }
+            >
+              <option value="auto">自动（推荐）</option>
+              <option value="original">关闭，使用规范化原图</option>
+              <option value="contour">轮廓强化 RGB</option>
+              <option value="rgb_depth">RGB＋弱深度明暗（实验）</option>
+            </select>
+            <small>
+              把风格规则转成 Hunyuan
+              能看到的轮廓与明暗；纯深度图只保存，不直接输入。
+            </small>
+          </label>
+          <label>
+            质量等级
+            <div className="choice-row">
+              {[
+                ["standard", "标准"],
+                ["high", "高"],
+                ["ultra", "超高"],
+              ].map(([v, l]) => (
+                <button
+                  type="button"
+                  className={form.quality === v ? "active" : ""}
+                  onClick={() => setForm({ ...form, quality: v })}
+                  key={v}
+                >
+                  {l}
+                </button>
+              ))}
+            </div>
+          </label>
+          <label className="check">
+            <input
+              type="checkbox"
+              checked={form.segmentationRequired}
+              onChange={(e) =>
+                setForm({ ...form, segmentationRequired: e.target.checked })
+              }
+            />{" "}
+            要求分件
+          </label>
+          <label className="check">
+            <input
+              type="checkbox"
+              checked={form.rigRequired}
+              onChange={(e) =>
+                setForm({ ...form, rigRequired: e.target.checked })
+              }
+            />{" "}
+            需要骨骼（非完成条件）
+          </label>
+          <label>
+            必须保持的特征
+            <textarea
+              value={form.preserveFeatures}
+              onChange={(e) =>
+                setForm({ ...form, preserveFeatures: e.target.value })
+              }
+            />
+          </label>
+          {error && <div className="notice danger">{error}</div>}
+        </aside>
+      </div>
+      <div className="sticky-actions">
+        <Button kind="secondary" disabled={saving} onClick={save}>
+          <Save /> {saving ? "保存中" : "保存草稿"}
+        </Button>
+        <span>
+          <ShieldCheck /> 文件将进行类型、内容、尺寸与哈希双重检查
+        </span>
+        <Button onClick={check}>
+          <UploadCloud /> 检查素材
+        </Button>
+      </div>
+    </>
+  );
+}

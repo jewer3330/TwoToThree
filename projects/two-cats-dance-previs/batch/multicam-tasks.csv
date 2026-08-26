@@ -1,0 +1,10 @@
+shot,group,priority,engine,seed,keyframe_status,output_prefix,status
+A01,A,1,wan-local,20260901,reuse-v1,two-cats-multicam/A01,reused-v1-pass
+A02,A,1,wan-local,20260902,approved,two-cats-multicam/A02,generated-pass
+A03,A,1,wan-local,20260903,approved,two-cats-multicam/A03,generated-r2-conditional
+B01,B,2,wan-local,20260911,reuse-v1,two-cats-multicam/B01,generated-pass
+B02,B,2,wan-local,20260912,approved,two-cats-multicam/B02,generated-pass
+B03,B,2,wan-local,20260913,approved,two-cats-multicam/B03,generated-pass
+C01,C,3,wan-local,20260921,reuse-v1-layout,two-cats-multicam/C01,generated-pass
+C02,C,3,wan-local,20260922,approved,two-cats-multicam/C02,generated-pass
+C03,C,3,wan-local,20260923,approved,two-cats-multicam/C03,generated-r2-pass

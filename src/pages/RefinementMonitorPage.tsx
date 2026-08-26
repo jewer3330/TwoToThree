@@ -1,13 +1,215 @@
-import {useEffect,useState} from 'react';
-import {CheckCircle2,Clock3,Download,MinusCircle,Terminal} from 'lucide-react';
-import {useNavigate,useParams} from 'react-router-dom';
-import {api} from '../api';import type {RefinementJob,Version} from '../types';import ModelViewport from '../components/ModelViewport';import {Button,PageHeader} from '../App';
-const labels:Record<string,string>={geometryRepair:'几何修复',uvUnwrap:'自动 UV',pbrMaterials:'PBR 材质',webOptimization:'Web 优化',visualReview:'视觉质量评审',identityRefine:'身份特征精修',segmentation:'分件',rigging:'骨骼绑定'};
-const statusLabel:Record<string,string>={passed:'已完成',running:'进行中',pending:'等待中',awaiting_review:'自动推断、待验收',awaiting_manual:'等待人工',not_configured:'未配置',failed:'未通过'};
-export default function RefinementMonitorPage(){
- const {jobId=''}=useParams(),nav=useNavigate(),[job,setJob]=useState<RefinementJob>(),[source,setSource]=useState<Version>(),[stats,setStats]=useState<Record<string,Record<string,number|string>>>({});
- useEffect(()=>{let live=true;const load=()=>api.refinement(jobId).then(j=>{if(!live)return;setJob(j);api.version(j.sourceVersionId).then(v=>live&&setSource(v))});load();const timer=setInterval(load,1000);return()=>{live=false;clearInterval(timer)}},[jobId]);
- if(!job)return <div className="loading"><span/>正在读取精修任务…</div>;
- const refined=job.artifacts.find(a=>a.type==='glb'),renders=job.artifacts.filter(a=>a.type==='render'),gates=(job.qualityReport as any)?.gates||{},done=!['queued','running'].includes(job.status);
- return <><PageHeader eyebrow={`精修任务 · ${job.id}`} title="Blender 精修预览与对比" description={`源版本 ${job.sourceVersionId} → ${job.outputVersionId||'正在生成新版本'}`}/><div className="refine-monitor"><aside className="panel refine-timeline"><h2>精修模块</h2>{job.config.modules.map(id=>{const s=job.moduleStates[id]||'pending';return <div className={`refine-step ${s}`} key={id}>{s==='passed'||s==='awaiting_review'?<CheckCircle2/>:s==='not_configured'?<MinusCircle/>:<Clock3/>}<span><b>{labels[id]||id}</b><small>{statusLabel[s]||s}</small></span></div>})}<h2>质量门禁</h2><div className="gate-list">{Object.entries(gates).map(([k,v])=><span className={v?'pass':'fail'} key={k}>{v?'✓':'×'} {k}</span>)}</div></aside><section className="refine-preview"><div className="model-compare"><article><header>源版本 <small>{source?.model?.label}</small></header>{source?.model?<ModelViewport url={source.model.url} onStats={s=>setStats(x=>({...x,source:s}))} onSelect={()=>{}}/>:<div className="render-wait">读取源 GLB…</div>}<dl>{Object.entries(stats.source||{}).map(([k,v])=><div key={k}><dt>{k}</dt><dd>{v}</dd></div>)}</dl></article><article><header>精修版本 <small>{job.outputVersionId||job.status}</small></header>{refined?<ModelViewport url={refined.url} onStats={s=>setStats(x=>({...x,refined:s}))} onSelect={()=>{}}/>:<div className="render-wait">{done?'没有可预览 GLB':'Blender 正在生成 GLB…'}</div>}<dl>{Object.entries(stats.refined||{}).map(([k,v])=><div key={k}><dt>{k}</dt><dd>{v}</dd></div>)}</dl></article></div>{renders.length>0&&<><h2 className="section-heading">精修四视图</h2><div className="refine-renders">{renders.map(a=><figure key={a.id}><img src={a.url} alt={a.label}/><figcaption>{a.label}</figcaption></figure>)}</div></>}</section><aside className="panel refine-log"><h2><Terminal/> 实时日志</h2><div>{job.logs.map((l,i)=><p key={i}>{l}</p>)}</div><h3>产物下载</h3><div className="refine-downloads">{job.artifacts.map(a=><a href={a.url} download key={a.id}><Download/> {a.label}</a>)}</div></aside></div><div className="sticky-actions"><Button kind="secondary" onClick={()=>nav('/')}>返回工作台</Button><span>{job.status==='awaiting_review'?'自动精修通过，等待视觉验收':`任务状态：${job.status}`}</span>{job.outputVersionId&&<Button onClick={()=>nav(`/review/${job.projectId}`)}>进入版本验收</Button>}</div></>
+import { useEffect, useState } from "react";
+import {
+  CheckCircle2,
+  Clock3,
+  Download,
+  MinusCircle,
+  Terminal,
+} from "lucide-react";
+import { useNavigate, useParams } from "react-router-dom";
+import { api } from "../api";
+import type { RefinementJob, Version } from "../types";
+import ModelViewport, {
+  type ViewportCameraState,
+} from "../components/ModelViewport";
+import { Button, PageHeader } from "../App";
+const labels: Record<string, string> = {
+  geometryRepair: "几何修复",
+  uvUnwrap: "自动 UV",
+  pbrMaterials: "PBR 材质",
+  webOptimization: "Web 优化",
+  visualReview: "视觉质量评审",
+  identityRefine: "身份特征精修",
+  segmentation: "分件",
+  rigging: "骨骼绑定",
+};
+const statusLabel: Record<string, string> = {
+  passed: "已完成",
+  running: "进行中",
+  pending: "等待中",
+  awaiting_review: "自动推断、待验收",
+  awaiting_manual: "等待人工",
+  not_configured: "未配置",
+  failed: "未通过",
+};
+export default function RefinementMonitorPage() {
+  const { jobId = "" } = useParams(),
+    nav = useNavigate(),
+    [job, setJob] = useState<RefinementJob>(),
+    [source, setSource] = useState<Version>(),
+    [stats, setStats] = useState<
+      Record<string, Record<string, number | string>>
+    >({}),
+    [camera, setCamera] = useState<ViewportCameraState>({
+      position: [7, 2.1, 0],
+      target: [0, 2, 0],
+    });
+  useEffect(() => {
+    let live = true;
+    const load = () =>
+      api.refinement(jobId).then((j) => {
+        if (!live) return;
+        setJob(j);
+        api.version(j.sourceVersionId).then((v) => live && setSource(v));
+      });
+    load();
+    const timer = setInterval(load, 1000);
+    return () => {
+      live = false;
+      clearInterval(timer);
+    };
+  }, [jobId]);
+  if (!job)
+    return (
+      <div className="loading">
+        <span />
+        正在读取精修任务…
+      </div>
+    );
+  const refined = job.artifacts.find((a) => a.type === "glb"),
+    renders = job.artifacts.filter((a) => a.type === "render"),
+    gates = (job.qualityReport as any)?.gates || {},
+    done = !["queued", "running"].includes(job.status);
+  return (
+    <>
+      <PageHeader
+        eyebrow={`精修任务 · ${job.id}`}
+        title="Blender 精修预览与对比"
+        description={`源版本 ${job.sourceVersionId} → ${job.outputVersionId || "正在生成新版本"}`}
+      />
+      <div className="refine-monitor">
+        <aside className="panel refine-timeline">
+          <h2>精修模块</h2>
+          {job.config.modules.map((id) => {
+            const s = job.moduleStates[id] || "pending";
+            return (
+              <div className={`refine-step ${s}`} key={id}>
+                {s === "passed" || s === "awaiting_review" ? (
+                  <CheckCircle2 />
+                ) : s === "not_configured" ? (
+                  <MinusCircle />
+                ) : (
+                  <Clock3 />
+                )}
+                <span>
+                  <b>{labels[id] || id}</b>
+                  <small>{statusLabel[s] || s}</small>
+                </span>
+              </div>
+            );
+          })}
+          <h2>质量门禁</h2>
+          <div className="gate-list">
+            {Object.entries(gates).map(([k, v]) => (
+              <span className={v ? "pass" : "fail"} key={k}>
+                {v ? "✓" : "×"} {k}
+              </span>
+            ))}
+          </div>
+        </aside>
+        <section className="refine-preview">
+          <div className="model-compare">
+            <article>
+              <header>
+                源版本 <small>{source?.model?.label}</small>
+              </header>
+              {source?.model ? (
+                <ModelViewport
+                  url={source.model.url}
+                  cameraState={camera}
+                  onCameraChange={setCamera}
+                  comparisonMode
+                  onStats={(s) => setStats((x) => ({ ...x, source: s }))}
+                  onSelect={() => {}}
+                />
+              ) : (
+                <div className="render-wait">读取源 GLB…</div>
+              )}
+              <dl>
+                {Object.entries(stats.source || {}).map(([k, v]) => (
+                  <div key={k}>
+                    <dt>{k}</dt>
+                    <dd>{v}</dd>
+                  </div>
+                ))}
+              </dl>
+            </article>
+            <article>
+              <header>
+                精修版本 <small>{job.outputVersionId || job.status}</small>
+              </header>
+              {refined ? (
+                <ModelViewport
+                  url={refined.url}
+                  cameraState={camera}
+                  onCameraChange={setCamera}
+                  comparisonMode
+                  onStats={(s) => setStats((x) => ({ ...x, refined: s }))}
+                  onSelect={() => {}}
+                />
+              ) : (
+                <div className="render-wait">
+                  {done ? "没有可预览 GLB" : "Blender 正在生成 GLB…"}
+                </div>
+              )}
+              <dl>
+                {Object.entries(stats.refined || {}).map(([k, v]) => (
+                  <div key={k}>
+                    <dt>{k}</dt>
+                    <dd>{v}</dd>
+                  </div>
+                ))}
+              </dl>
+            </article>
+          </div>
+          {renders.length > 0 && (
+            <>
+              <h2 className="section-heading">精修四视图</h2>
+              <div className="refine-renders">
+                {renders.map((a) => (
+                  <figure key={a.id}>
+                    <img src={a.url} alt={a.label} />
+                    <figcaption>{a.label}</figcaption>
+                  </figure>
+                ))}
+              </div>
+            </>
+          )}
+        </section>
+        <aside className="panel refine-log">
+          <h2>
+            <Terminal /> 实时日志
+          </h2>
+          <div>
+            {job.logs.map((l, i) => (
+              <p key={i}>{l}</p>
+            ))}
+          </div>
+          <h3>产物下载</h3>
+          <div className="refine-downloads">
+            {job.artifacts.map((a) => (
+              <a href={a.url} download key={a.id}>
+                <Download /> {a.label}
+              </a>
+            ))}
+          </div>
+        </aside>
+      </div>
+      <div className="sticky-actions">
+        <Button kind="secondary" onClick={() => nav("/")}>
+          返回工作台
+        </Button>
+        <span>
+          {job.status === "awaiting_review"
+            ? "自动精修通过，等待视觉验收"
+            : `任务状态：${job.status}`}
+        </span>
+        {job.outputVersionId && (
+          <Button onClick={() => nav(`/review/${job.projectId}`)}>
+            进入版本验收
+          </Button>
+        )}
+      </div>
+    </>
+  );
 }

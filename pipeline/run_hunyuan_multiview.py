@@ -12,12 +12,15 @@ from PIL import Image
 
 
 ROOT = Path(__file__).resolve().parents[1]
-RUNTIME = ROOT / ".local" / "Hunyuan3D-2mv-runtime"
 sys.path.insert(0, str(ROOT))
+from studio_paths import LOCAL_ROOT  # noqa: E402
+
+RUNTIME = LOCAL_ROOT / "Hunyuan3D-2mv-runtime"
 sys.path.insert(0, str(RUNTIME))
 
 from hy3dgen.shapegen import Hunyuan3DDiTFlowMatchingPipeline  # noqa: E402
 from pipeline.run_hunyuan_yoyo import prepare_condition_image  # noqa: E402
+from pipeline.multiview_visual_conditioning import build_candidates  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
@@ -34,6 +37,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--front-weight", type=float, default=1.8)
     parser.add_argument("--side-weight", type=float, default=1.0)
     parser.add_argument("--back-weight", type=float, default=0.7)
+    parser.add_argument("--visual-conditioning", choices=("auto","original","contour","rgb_depth"), default="auto")
+    parser.add_argument("--style", choices=("realistic","cartoon","chibi"), default="realistic")
+    parser.add_argument("--depth-blend", type=float, default=.15)
     return parser.parse_args()
 
 
@@ -48,9 +54,25 @@ def main() -> None:
         print(f"processed_{official_role}={path}")
     print("preprocessing=" + json.dumps(report, ensure_ascii=False))
 
+    conditioned=build_candidates({"front":images["front"],"side":images["left"],"back":images["back"]},processed_dir/"visual-candidates",args.visual_conditioning,args.style,args.depth_blend)
+    images={"front":Image.open(conditioned["images"]["front"]),"left":Image.open(conditioned["images"]["side"]),"back":Image.open(conditioned["images"]["back"])}
+    print("visual_conditioning="+json.dumps({"selectedMode":conditioned["report"]["selectedMode"],"reportPath":str(conditioned["reportPath"])},ensure_ascii=False))
+    # Load the 1.1B multiview pipeline on CPU first.  Loading all components
+    # directly onto an 8 GB GPU can crash nvcuda64.dll before PyTorch can raise
+    # a recoverable OOM (Windows exit 0xC0000409).
+    print("memory_mode=cpu_load_model_offload", flush=True)
     pipeline = Hunyuan3DDiTFlowMatchingPipeline.from_pretrained(
-        str(args.model), subfolder="hunyuan3d-dit-v2-mv", variant="fp16", device="cuda", dtype=torch.float16
+        str(args.model), subfolder="hunyuan3d-dit-v2-mv", variant="fp16", device="cpu", dtype=torch.float16
     )
+    pipeline.components = {
+        "conditioner": pipeline.conditioner,
+        "model": pipeline.model,
+        "vae": pipeline.vae,
+    }
+    pipeline.enable_model_cpu_offload()
+    # This custom pipeline still uses self.device for latents and scheduler
+    # tensors; offload hooks independently control where each model resides.
+    pipeline.device = torch.device("cuda")
     view_weights = [args.front_weight, args.side_weight, args.back_weight]
     original_forward = pipeline.conditioner.forward
     def weighted_forward(*forward_args, **forward_kwargs):
@@ -73,7 +95,7 @@ def main() -> None:
         num_inference_steps=args.steps,
         octree_resolution=args.resolution,
         num_chunks=4000,
-        generator=torch.manual_seed(args.seed),
+        generator=torch.Generator(device="cuda").manual_seed(args.seed),
         output_type="trimesh",
     )[0]
     mesh.export(args.output)

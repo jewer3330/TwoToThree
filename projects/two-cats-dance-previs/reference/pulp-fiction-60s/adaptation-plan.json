@@ -1,0 +1,51 @@
+{
+  "source_window_seconds": [0, 60],
+  "usage": "motion-and-camera-reference-only",
+  "reference_shot_boundaries_seconds": [0, 29.76, 33.55, 53.92, 60],
+  "base_motion": {
+    "legs": "持续小幅屈膝弹跳、左右重心转移、短距离step-tap，脚掌贴地",
+    "spacing": "双猫面对面并保持分离，不换位、不交叉",
+    "complexity_rule": "同一时刻只让一只猫执行复杂上身动作，另一只维持基础律动"
+  },
+  "eight_second_test": [
+    {
+      "frames": [0, 47],
+      "camera": "固定双人全景，略低机位",
+      "leader": "both-simple",
+      "motion": "同步基础膝盖弹跳与左右step-tap"
+    },
+    {
+      "frames": [48, 95],
+      "camera": "继续固定双人全景",
+      "leader": "black-then-orange",
+      "motion": "黑猫肩膀前送和前臂小摆，橘猫延后半拍回应"
+    },
+    {
+      "frames": [96, 143],
+      "camera": "双人中近景",
+      "leader": "orange",
+      "motion": "橘猫前臂横扫并带动视线，黑猫保持基础律动"
+    },
+    {
+      "frames": [144, 175],
+      "camera": "斜侧双人中景",
+      "leader": "both-simple",
+      "motion": "两只猫继续小步扭转，轮廓保持分离"
+    },
+    {
+      "frames": [176, 191],
+      "camera": "返回双人全景",
+      "leader": "both-simple",
+      "motion": "一次轻微下沉后站稳定格"
+    }
+  ],
+  "avoid": [
+    "复制原片演员外观或服装",
+    "双猫同时执行复杂大动作",
+    "频繁平均切镜",
+    "跨越180度轴线",
+    "要求清晰复杂手指动作",
+    "长时间腿脚特写"
+  ]
+}
+

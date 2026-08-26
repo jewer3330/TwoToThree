@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import shutil
+import sys
 import time
 import urllib.request
 import uuid
@@ -14,7 +15,10 @@ from PIL import Image, ImageDraw
 
 
 ROOT = Path(__file__).resolve().parents[1]
-COMFY = ROOT / ".local" / "ComfyUI"
+sys.path.insert(0, str(ROOT))
+from studio_paths import LOCAL_ROOT, OUTPUT_ROOT  # noqa: E402
+
+COMFY = LOCAL_ROOT / "ComfyUI"
 
 
 def request_json(url: str, payload: dict | None = None) -> dict:
@@ -78,7 +82,7 @@ def main() -> None:
             if images:
                 item = images[0]
                 source = COMFY / "output" / item.get("subfolder", "") / item["filename"]
-                target_dir = ROOT / "output" / "comment-reference-drafts"
+                target_dir = OUTPUT_ROOT / "comment-reference-drafts"
                 target_dir.mkdir(parents=True, exist_ok=True)
                 target = target_dir / item["filename"]
                 shutil.copy2(source, target)

@@ -23,7 +23,7 @@ npm run dev
 - 示例任务使用仓库内已有、已验证的 Hunyuan/Blender 基线 GLB 和四视图，以便完整演示验收闭环。
 - Worker 会明确记录 `local-verified-baseline`，不会把示例基线冒充为本次 Hunyuan 推理。
 - 在接入生产 GPU 前，先配置模型权重与命令适配器；缺少 Blender 或 Hunyuan 权重不会被伪装为健康状态。
-- SQLite 与所有任务产物位于 `data/`。基线文件只复制到新版本目录，不会被覆盖。
+- 大模型、SQLite 与生成产物默认位于 `%USERPROFILE%\AIData\3d`，可用 `STUDIO_EXTERNAL_ROOT` 覆盖。基线文件只复制到新版本目录，不会被覆盖。
 
 ## 验证
 
@@ -37,7 +37,7 @@ npm run build
 
 - `src/`：React/TypeScript 工作台与 Three.js 视口
 - `server/`：FastAPI、SQLite、上传验证、SSE 与本地 Worker
-- `data/projects/<project-id>/versions/<version-id>/`：隔离的配置、模型、渲染、报告和日志
+- `%USERPROFILE%\AIData\3d\data\projects\<project-id>\versions\<version-id>\`：隔离的配置、模型、渲染、报告和日志
 - `tests/`：上传安全与端到端任务契约测试
 - `design/`：原始产品与实施规范
 

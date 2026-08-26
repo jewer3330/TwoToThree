@@ -9,7 +9,8 @@ param(
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 $Root = Split-Path -Parent $PSScriptRoot
-$Local = Join-Path $Root '.local'
+$ExternalRoot = if ($env:STUDIO_EXTERNAL_ROOT) { $env:STUDIO_EXTERNAL_ROOT } else { Join-Path $HOME 'AIData\3d' }
+$Local = Join-Path $ExternalRoot 'local'
 $BlenderRoot = Join-Path $Local 'Blender52'
 $BlenderExe = Join-Path $BlenderRoot 'blender.exe'
 $BlenderMsi = Join-Path $Local 'blender-5.2.0-windows-x64.msi'

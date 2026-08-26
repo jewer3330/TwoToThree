@@ -8,7 +8,8 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
-$LocalRoot = Join-Path $ProjectRoot '.local'
+$ExternalRoot = if ($env:STUDIO_EXTERNAL_ROOT) { $env:STUDIO_EXTERNAL_ROOT } else { Join-Path $HOME 'AIData\3d' }
+$LocalRoot = Join-Path $ExternalRoot 'local'
 $ComfyRoot = Join-Path $LocalRoot 'ComfyUI'
 $GpuPython = Join-Path $ComfyRoot '.venv-gpu\Scripts\python.exe'
 $ComfyRevision = 'b323a345bbbfb2f3a95b5b73b68eb7919a26515e'
