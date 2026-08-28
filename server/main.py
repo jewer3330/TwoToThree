@@ -1,17 +1,18 @@
 from __future__ import annotations
-import asyncio, json, mimetypes, os, random, shutil, threading
+import asyncio, json, mimetypes, os, random, secrets, shutil, threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 import psutil
-from fastapi import FastAPI,File,HTTPException,Query,Request,UploadFile
+from fastapi import Depends,FastAPI,File,Header,HTTPException,Query,Request,UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse,StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from PIL import Image,UnidentifiedImageError
 from pydantic import BaseModel,Field
+from . import config,storage
 from .core import DATA,ROOT,db,dump,init_db,load,now,project_dir,rowdict,sha256,slugify,uid
-from .worker import STAGES,launch
+from .worker import STAGES,emit,launch,state_for
 from .backends import capabilities,refine_blender,CancelledError
 
 @asynccontextmanager
@@ -171,7 +172,9 @@ def new_job(pid,config,attempt):
         number=con.execute('SELECT COALESCE(MAX(number),0)+1 FROM versions WHERE project_id=?',(pid,)).fetchone()[0];vid=uid('ver');jid=uid('job');stamp=now();con.execute('INSERT INTO versions VALUES(?,?,?,?,?,?,?)',(vid,pid,number,f'v{number:03d}','processing',None,stamp));con.execute('INSERT INTO jobs VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',(jid,pid,vid,'queued',dump(config),config['primaryBackend'],None,None,random.randint(1,2**31-1),None,attempt,stamp,None,None,None,None,0));
         for i,(key,label) in enumerate(STAGES):con.execute('INSERT INTO stages(id,job_id,stage_key,label,status,position) VALUES(?,?,?,?,?,?)',(uid('stg'),jid,key,label,'pending',i))
         con.execute("UPDATE projects SET status='queued',current_job_id=?,passed_stages=0,total_stages=?,updated_at=? WHERE id=?",(jid,len(STAGES),stamp,pid))
-    folder=project_dir(pid)/'versions'/vid;folder.mkdir(parents=True);(folder/'job-config.json').write_text(json.dumps({'schemaVersion':1,'projectId':pid,'versionId':vid,'jobId':jid,'attempt':attempt,**config},ensure_ascii=False,indent=2),encoding='utf-8');launch(jid);return job_json(jid)
+    folder=project_dir(pid)/'versions'/vid;folder.mkdir(parents=True);(folder/'job-config.json').write_text(json.dumps({'schemaVersion':1,'projectId':pid,'versionId':vid,'jobId':jid,'attempt':attempt,**config},ensure_ascii=False,indent=2),encoding='utf-8')
+    if config.WORKER_MODE != 'remote':launch(jid)
+    return job_json(jid)
 def job_json(jid):
     with db() as con:
         r=con.execute('SELECT * FROM jobs WHERE id=?',(jid,)).fetchone()
@@ -271,7 +274,7 @@ def create_refinement(body:RefinementInput):
     if not body.modules:raise HTTPException(422,'至少选择一个精修模块')
     jid=uid('ref');stamp=now();states={m:'pending' for m in body.modules};logs=[f'[{stamp[11:19]}] 精修任务创建，源版本 v{source["number"]:03d} 已锁定']
     with db() as con:con.execute('INSERT INTO refinement_jobs(id,project_id,source_version_id,output_version_id,status,config,module_states,logs,created_at) VALUES(?,?,?,?,?,?,?,?,?)',(jid,source['projectId'],body.sourceVersionId,None,'queued',dump(body.model_dump()),dump(states),dump(logs),stamp));con.execute("UPDATE projects SET status='revision_requested',updated_at=? WHERE id=?",(stamp,source['projectId']))
-    threading.Thread(target=run_refinement,args=(jid,),daemon=True).start()
+    if config.WORKER_MODE != 'remote':threading.Thread(target=run_refinement,args=(jid,),daemon=True).start()
     with db() as con:r=con.execute('SELECT * FROM refinement_jobs WHERE id=?',(jid,)).fetchone()
     return refinement_json(r)
 def run_refinement(jid):
@@ -293,26 +296,32 @@ def run_refinement(jid):
             cap=REFINEMENT_MODULES[m]['capability'];states[m]='running' if cap in ('automatic','inferred') else 'not_configured'
         with db() as con:con.execute('UPDATE refinement_jobs SET module_states=? WHERE id=?',(dump(states),jid))
         result=refine_blender(ROOT/source['storage_path'],root,config_path,save_log,cancelled,ROOT/reference['storage_path'] if reference else None)
-        for m in config['modules']:
-            cap=REFINEMENT_MODULES[m]['capability'];states[m]='awaiting_review' if cap=='inferred' else 'passed' if cap=='automatic' else 'not_configured'
-        gates=result.get('gates',{})
-        if not gates.get('meshValid',False) or not gates.get('boundsSafe',False):states['geometryRepair']='failed'
-        if 'uvUnwrap' in states and not gates.get('uvValid',False):states['uvUnwrap']='failed'
-        if 'pbrMaterials' in states and not gates.get('pbrComplete',False):states['pbrMaterials']='failed'
-        if 'webOptimization' in states and (not gates.get('triangleBudget',False) or not gates.get('sizeBudget',False) or not gates.get('glbValid',False)):states['webOptimization']='failed'
-        if 'visualReview' in states and not gates.get('rendersComplete',False):states['visualReview']='failed'
-        stamp=now();status='awaiting_review' if result['status']=='passed' else 'quality_failed'
-        with db() as con:
-            con.execute('INSERT INTO versions VALUES(?,?,?,?,?,?,?)',(out_vid,d['project_id'],number,f'v{number:03d} · Blender 自动精修','ready_for_review' if status=='awaiting_review' else 'quality_failed',dump(result),stamp));con.execute('INSERT INTO version_links VALUES(?,?,?,?,?)',(uid('vln'),d['source_version_id'],out_vid,jid,stamp))
-            files=[('glb','refined.glb',root/'refined.glb','model/gltf-binary'),('quality_report','quality-report.json',root/'quality-report.json','application/json'),('config','config-snapshot.json',config_path,'application/json')]+[('texture',f'{n}.png',root/'textures'/f'{n}.png','image/png') for n in ('base-color','roughness','metallic','normal','ao')]+[('render',f'{n}.png',root/f'{n}.png','image/png') for n in ('front','left-three-quarter','side','back')]
-            for kind,label,path,mime in files:
-                if path.exists():con.execute('INSERT INTO refinement_artifacts VALUES(?,?,?,?,?,?,?,?,?,?,?)',(uid('rart'),jid,out_vid,kind,label,path.relative_to(ROOT).as_posix(),mime,path.stat().st_size,sha256(path),dump({'sourceVersionId':d['source_version_id']}),stamp))
-            con.execute('UPDATE refinement_jobs SET output_version_id=?,status=?,module_states=?,logs=?,completed_at=?,blender_version=?,quality_report=? WHERE id=?',(out_vid,status,dump(states),dump(logs),stamp,result.get('blenderVersion'),dump(result),jid));con.execute('UPDATE projects SET status=?,updated_at=? WHERE id=?',('ready_for_review' if status=='awaiting_review' else 'quality_failed',stamp,d['project_id']))
+        files=[('glb','refined.glb',root/'refined.glb','model/gltf-binary'),('quality_report','quality-report.json',root/'quality-report.json','application/json'),('config','config-snapshot.json',config_path,'application/json')]+[('texture',f'{n}.png',root/'textures'/f'{n}.png','image/png') for n in ('base-color','roughness','metallic','normal','ao')]+[('render',f'{n}.png',root/f'{n}.png','image/png') for n in ('front','left-three-quarter','side','back')]
+        _commit_refinement_result(jid,result,number,out_vid,files)
     except CancelledError as exc:
         with db() as con:con.execute("UPDATE refinement_jobs SET status='cancelled',logs=?,completed_at=?,error_summary=? WHERE id=?",(dump(logs),now(),str(exc),jid))
     except Exception as exc:
         save_log(f'精修失败：{exc}')
         with db() as con:con.execute("UPDATE refinement_jobs SET status='failed',module_states=?,completed_at=?,error_summary=? WHERE id=?",(dump(states),now(),str(exc),jid))
+
+def _refine_module_states(config,result):
+    states={m:('awaiting_review' if REFINEMENT_MODULES[m]['capability']=='inferred' else 'passed' if REFINEMENT_MODULES[m]['capability']=='automatic' else 'not_configured') for m in config.get('modules',[])}
+    gates=result.get('gates',{})
+    if not gates.get('meshValid',False) or not gates.get('boundsSafe',False):states['geometryRepair']='failed'
+    if 'uvUnwrap' in states and not gates.get('uvValid',False):states['uvUnwrap']='failed'
+    if 'pbrMaterials' in states and not gates.get('pbrComplete',False):states['pbrMaterials']='failed'
+    if 'webOptimization' in states and (not gates.get('triangleBudget',False) or not gates.get('sizeBudget',False) or not gates.get('glbValid',False)):states['webOptimization']='failed'
+    if 'visualReview' in states and not gates.get('rendersComplete',False):states['visualReview']='failed'
+    return states
+
+def _commit_refinement_result(jid,result,number,out_vid,files):
+    with db() as con:d=dict(con.execute('SELECT * FROM refinement_jobs WHERE id=?',(jid,)).fetchone())
+    states=_refine_module_states(load(d['config'],{}),result);status='awaiting_review' if result['status']=='passed' else 'quality_failed';stamp=now()
+    with db() as con:
+        con.execute('INSERT INTO versions VALUES(?,?,?,?,?,?,?)',(out_vid,d['project_id'],number,f'v{number:03d} · Blender 自动精修','ready_for_review' if status=='awaiting_review' else 'quality_failed',dump(result),stamp));con.execute('INSERT INTO version_links VALUES(?,?,?,?,?)',(uid('vln'),d['source_version_id'],out_vid,jid,stamp))
+        for kind,label,path,mime in files:
+            if path.exists():con.execute('INSERT INTO refinement_artifacts VALUES(?,?,?,?,?,?,?,?,?,?,?)',(uid('rart'),jid,out_vid,kind,label,path.relative_to(ROOT).as_posix(),mime,path.stat().st_size,sha256(path),dump({'sourceVersionId':d['source_version_id']}),stamp))
+        con.execute('UPDATE refinement_jobs SET output_version_id=?,status=?,module_states=?,logs=?,completed_at=?,blender_version=?,quality_report=? WHERE id=?',(out_vid,status,dump(states),d['logs'],stamp,result.get('blenderVersion'),dump(result),jid));con.execute('UPDATE projects SET status=?,updated_at=? WHERE id=?',('ready_for_review' if status=='awaiting_review' else 'quality_failed',stamp,d['project_id']))
 @app.get('/api/refinement/jobs/{jid}')
 def get_refinement(jid:str):
     with db() as con:r=con.execute('SELECT * FROM refinement_jobs WHERE id=?',(jid,)).fetchone()
@@ -327,6 +336,168 @@ def cancel_refinement(jid:str):
 def project_refinements(pid:str):
     with db() as con:rows=con.execute('SELECT * FROM refinement_jobs WHERE project_id=? ORDER BY created_at DESC',(pid,)).fetchall()
     return [refinement_json(r) for r in rows]
+
+
+# --------------------------------------------------------------------------- #
+# 远端 Worker 接口（总控 + OSS + 显卡机器）
+# --------------------------------------------------------------------------- #
+def _require_worker(x_worker_token:str=Header(default='',alias='X-Worker-Token')):
+    if not config.WORKER_TOKEN:raise HTTPException(503,'远端 Worker 未启用（缺少 WORKER_TOKEN）')
+    if not secrets.compare_digest(x_worker_token,config.WORKER_TOKEN):raise HTTPException(401,'Worker token 无效')
+
+def _input_oss_key(a):
+    return f"projects/{a['project_id']}/assets/{a['id']}{Path(a['storage_path']).suffix}"
+
+def _prepare_input(oss,a):
+    key=_input_oss_key(a)
+    if not oss.exists(key):oss.upload(ROOT/a['storage_path'],key)
+    return {'role':a['role'],'originalName':a['original_name'],'mimeType':a['mime_type'],'sha256':a['sha256'],'ossKey':key,'url':oss.sign_get(key)}
+
+def _generate_target(kind,label):
+    name=Path(label).name
+    if kind=='render':return Path('renders')/f'{name}.png'
+    if kind=='glb':return Path('models')/name
+    return Path(name)
+
+def _refine_local_path(kind,label):
+    name=Path(label).name
+    return Path('textures')/name if kind=='texture' else Path(name)
+
+class WorkerArtifact(BaseModel):
+    kind:str;label:str;ossKey:str;mimeType:str;byteSize:int;sha256:str;metadata:dict={}
+class GenerateComplete(BaseModel):
+    actualBackend:str;modelVersion:str|None=None;qualityReport:dict={};artifacts:list[WorkerArtifact]
+class RefineComplete(BaseModel):
+    result:dict;artifacts:list[WorkerArtifact]
+class StageReport(BaseModel):
+    stage:str;status:str;label:str|None=None;message:str|None=None;warnings:list[str]=[]
+class LogInput(BaseModel):
+    message:str
+class FailInput(BaseModel):
+    error:str;stage:str|None=None
+
+@app.post('/api/worker/generate/claim')
+def worker_claim(_=Depends(_require_worker)):
+    with db() as con:
+        row=con.execute("SELECT * FROM jobs WHERE status='queued' ORDER BY created_at LIMIT 1").fetchone()
+        if not row:return {}
+        cur=con.execute("UPDATE jobs SET status='running',started_at=? WHERE id=? AND status='queued'",(now(),row['id']))
+        if cur.rowcount!=1:return {}
+        job=dict(row)
+        assets=con.execute("SELECT * FROM assets WHERE project_id=? AND active=1 AND mime_type LIKE 'image/%' ORDER BY created_at",(job['project_id'],)).fetchall()
+    oss=storage.oss();emit(job['id'],'job.status',{'status':'running'})
+    return {'type':'generate','jobId':job['id'],'projectId':job['project_id'],'versionId':job['version_id'],'attempt':job['attempt'],'seed':job['seed'],'config':load(job['config_snapshot'],{}),'inputs':[_prepare_input(oss,a) for a in assets]}
+
+@app.get('/api/worker/generate/{jid}/inputs')
+def worker_inputs(jid:str,_=Depends(_require_worker)):
+    oss=storage.oss()
+    with db() as con:
+        job=con.execute('SELECT * FROM jobs WHERE id=?',(jid,)).fetchone()
+        if not job:raise HTTPException(404,'任务不存在')
+        assets=con.execute("SELECT * FROM assets WHERE project_id=? AND active=1 AND mime_type LIKE 'image/%' ORDER BY created_at",(job['project_id'],)).fetchall()
+    return {'inputs':[_prepare_input(oss,a) for a in assets]}
+
+@app.post('/api/worker/generate/{jid}/stage',status_code=204)
+def worker_stage(jid:str,body:StageReport,_=Depends(_require_worker)):
+    with db() as con:
+        job=con.execute('SELECT * FROM jobs WHERE id=?',(jid,)).fetchone()
+        if not job:raise HTTPException(404,'任务不存在')
+        job=dict(job)
+    stamp=now();to_emit=None
+    with db() as con:
+        if body.status=='running':
+            con.execute("UPDATE stages SET status='running',started_at=? WHERE job_id=? AND stage_key=?",(stamp,jid,body.stage));con.execute('UPDATE jobs SET current_stage=? WHERE id=?',(body.stage,jid));con.execute('UPDATE projects SET status=?,updated_at=? WHERE id=?',(state_for(body.stage),stamp,job['project_id']))
+            to_emit=('stage.started',{'stage':body.stage,'label':body.label or body.stage})
+        elif body.status=='passed':
+            con.execute("UPDATE stages SET status='passed',completed_at=? WHERE job_id=? AND stage_key=?",(stamp,jid,body.stage));passed=con.execute("SELECT COUNT(*) FROM stages WHERE job_id=? AND status='passed'",(jid,)).fetchone()[0];con.execute('UPDATE projects SET passed_stages=?,updated_at=? WHERE id=?',(passed,stamp,job['project_id']))
+            to_emit=('stage.completed',{'stage':body.stage,'status':'passed','warnings':body.warnings})
+        elif body.status=='failed':
+            con.execute("UPDATE stages SET status='failed',completed_at=? WHERE job_id=? AND stage_key=?",(stamp,jid,body.stage))
+            to_emit=('stage.failed',{'stage':body.stage,'error':body.message})
+    if to_emit:emit(jid,to_emit[0],to_emit[1])
+    if body.message:emit(jid,'stage.log',{'message':f'[{stamp[11:19]}] {body.message}'})
+
+@app.post('/api/worker/generate/{jid}/log',status_code=204)
+def worker_log(jid:str,body:LogInput,_=Depends(_require_worker)):
+    emit(jid,'stage.log',{'message':f'[{now()[11:19]}] {body.message}'})
+
+@app.post('/api/worker/generate/{jid}/complete')
+def worker_complete(jid:str,body:GenerateComplete,_=Depends(_require_worker)):
+    oss=storage.oss()
+    with db() as con:
+        job=con.execute('SELECT * FROM jobs WHERE id=?',(jid,)).fetchone()
+        if not job:raise HTTPException(404,'任务不存在')
+        job=dict(job)
+    version_root=project_dir(job['project_id'])/'versions'/job['version_id'];inserted=[]
+    for a in body.artifacts:
+        local=version_root/_generate_target(a.kind,a.label);local.parent.mkdir(parents=True,exist_ok=True);oss.download(a.ossKey,local);digest=sha256(local)
+        if digest!=a.sha256:raise HTTPException(422,f'产物校验失败：{a.label}')
+        aid=uid('art');rel=local.relative_to(ROOT).as_posix()
+        with db() as con:con.execute('INSERT INTO artifacts VALUES(?,?,?,?,?,?,?,?,?,?,?)',(aid,jid,job['version_id'],a.kind,a.label,rel,a.mimeType,a.byteSize,digest,dump(a.metadata),now()))
+        inserted.append(aid)
+    stamp=now()
+    with db() as con:
+        con.execute("UPDATE jobs SET status='completed',actual_backend=?,model_version=?,completed_at=? WHERE id=?",(body.actualBackend,body.modelVersion,stamp,jid));con.execute("UPDATE projects SET status='ready_for_review',actual_backend=?,passed_stages=?,total_stages=?,updated_at=? WHERE id=?",(body.actualBackend,len(STAGES),len(STAGES),stamp,job['project_id']));con.execute("UPDATE versions SET status='ready_for_review',quality_report=? WHERE id=?",(dump(body.qualityReport),job['version_id']))
+    emit(jid,'job.completed',{'status':'completed','versionId':job['version_id']})
+    return {'status':'completed','jobId':jid,'artifacts':inserted}
+
+@app.post('/api/worker/generate/{jid}/fail')
+def worker_fail(jid:str,body:FailInput,_=Depends(_require_worker)):
+    stamp=now()
+    with db() as con:
+        con.execute("UPDATE jobs SET status='failed',error_code='WORKER_ERROR',error_summary=?,completed_at=? WHERE id=?",(body.error,stamp,jid));con.execute("UPDATE projects SET status='failed',updated_at=? WHERE current_job_id=?",(stamp,jid))
+    emit(jid,'stage.failed',{'error':body.error,'stage':body.stage})
+    return {'status':'failed','jobId':jid}
+
+@app.post('/api/worker/refine/claim')
+def worker_refine_claim(_=Depends(_require_worker)):
+    with db() as con:
+        row=con.execute("SELECT * FROM refinement_jobs WHERE status='queued' ORDER BY created_at LIMIT 1").fetchone()
+        if not row:return {}
+        cur=con.execute("UPDATE refinement_jobs SET status='running',started_at=? WHERE id=? AND status='queued'",(now(),row['id']))
+        if cur.rowcount!=1:return {}
+        d=dict(row)
+        source=con.execute("SELECT storage_path FROM artifacts WHERE version_id=? AND type='glb' ORDER BY created_at DESC LIMIT 1",(d['source_version_id'],)).fetchone()
+        if not source:source=con.execute("SELECT storage_path FROM refinement_artifacts WHERE version_id=? AND type='glb' ORDER BY created_at DESC LIMIT 1",(d['source_version_id'],)).fetchone()
+        if not source:raise HTTPException(409,'源版本 GLB 产物不存在')
+        reference=con.execute("SELECT * FROM assets WHERE project_id=? AND role='front' AND active=1 ORDER BY created_at DESC LIMIT 1",(d['project_id'],)).fetchone()
+    oss=storage.oss();source_key=f"projects/{d['project_id']}/versions/{d['source_version_id']}/source.glb"
+    if not oss.exists(source_key):oss.upload(ROOT/source['storage_path'],source_key)
+    payload={'type':'refine','refinementJobId':d['id'],'projectId':d['project_id'],'sourceVersionId':d['source_version_id'],'sourceGlb':{'ossKey':source_key,'url':oss.sign_get(source_key),'sha256':sha256(ROOT/source['storage_path'])},'config':load(d['config'],{})}
+    if reference:
+        key=_input_oss_key(reference)
+        if not oss.exists(key):oss.upload(ROOT/reference['storage_path'],key)
+        payload['reference']={'ossKey':key,'url':oss.sign_get(key)}
+    return payload
+
+@app.post('/api/worker/refine/{jid}/log',status_code=204)
+def worker_refine_log(jid:str,body:LogInput,_=Depends(_require_worker)):
+    with db() as con:
+        r=con.execute('SELECT * FROM refinement_jobs WHERE id=?',(jid,)).fetchone()
+        if not r:raise HTTPException(404,'精修任务不存在')
+        logs=load(r['logs'],[]);logs.append(f'[{now()[11:19]}] {body.message}');con.execute('UPDATE refinement_jobs SET logs=? WHERE id=?',(dump(logs),jid))
+
+@app.post('/api/worker/refine/{jid}/complete')
+def worker_refine_complete(jid:str,body:RefineComplete,_=Depends(_require_worker)):
+    oss=storage.oss()
+    with db() as con:
+        d=con.execute('SELECT * FROM refinement_jobs WHERE id=?',(jid,)).fetchone()
+        if not d:raise HTTPException(404,'精修任务不存在')
+        d=dict(d)
+    with db() as con:number=con.execute('SELECT COALESCE(MAX(number),0)+1 FROM versions WHERE project_id=?',(d['project_id'],)).fetchone()[0]
+    out_vid=uid('ver');root=project_dir(d['project_id'])/'versions'/out_vid/'refinement';root.mkdir(parents=True,exist_ok=True);files=[]
+    for a in body.artifacts:
+        local=root/_refine_local_path(a.kind,a.label);local.parent.mkdir(parents=True,exist_ok=True);oss.download(a.ossKey,local);digest=sha256(local)
+        if digest!=a.sha256:raise HTTPException(422,f'产物校验失败：{a.label}')
+        files.append((a.kind,a.label,local,a.mimeType))
+    _commit_refinement_result(jid,body.result,number,out_vid,files)
+    return {'status':'completed','refinementJobId':jid,'outputVersionId':out_vid}
+
+@app.post('/api/worker/refine/{jid}/fail')
+def worker_refine_fail(jid:str,body:FailInput,_=Depends(_require_worker)):
+    with db() as con:con.execute("UPDATE refinement_jobs SET status='failed',completed_at=?,error_summary=? WHERE id=?",(now(),body.error,jid))
+    return {'status':'failed','refinementJobId':jid}
+
 
 def seed_demo():
     with db() as con:

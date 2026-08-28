@@ -18,6 +18,16 @@ npm run api
 npm run dev
 ```
 
+## 部署架构（总控 + OSS + 显卡机器）
+
+默认仍是单机模式（`WORKER_MODE=local`，进程内线程跑流水线）。设置 `WORKER_MODE=remote` 后拆为三节点：
+
+- **总控**（ECS）：FastAPI + SQLite + 前端，任务停在 `queued`，通过 `/api/worker/*` 接口供远端认领。
+- **OSS**：输入素材与产物的共享交换层。
+- **显卡机**：`server.remote_worker` 拉取任务、跑 Hunyuan3D/Blender、产物回传 OSS 并上报。
+
+部署步骤与环境变量见 [`deploy/README.md`](deploy/README.md)，架构与数据流见 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)。
+
 ## 当前运行边界
 
 - 示例任务使用仓库内已有、已验证的 Hunyuan/Blender 基线 GLB 和四视图，以便完整演示验收闭环。

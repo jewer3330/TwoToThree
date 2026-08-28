@@ -1,0 +1,15 @@
+[Unit]
+Description=2D to 3D Studio remote worker (GPU / Blender)
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/two-to-three
+EnvironmentFile=/opt/two-to-three/deploy/worker.env
+ExecStart=/opt/two-to-three/.venv/bin/python -m server.remote_worker
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
