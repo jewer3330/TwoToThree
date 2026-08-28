@@ -3,23 +3,23 @@ import os, subprocess, threading, time
 from pathlib import Path
 from typing import Callable
 from .core import ROOT
-from studio_paths import LOCAL_ROOT
+from . import config
 
-HUNYUAN_PY=LOCAL_ROOT/'hunyuan-bootstrap/Scripts/python.exe'
-HUNYUAN_MODEL=LOCAL_ROOT/'Hunyuan3D-2.1-model'
-HUNYUAN_RUNNER=ROOT/'pipeline/run_hunyuan_yoyo.py'
-HUNYUAN_MV_MODEL=LOCAL_ROOT/'Hunyuan3D-2mv-model-v2'
-HUNYUAN_MV_RUNNER=ROOT/'pipeline/run_hunyuan_multiview.py'
+HUNYUAN_PY=Path(config.HUNYUAN_PY)
+HUNYUAN_MODEL=Path(config.HUNYUAN_MODEL)
+HUNYUAN_RUNNER=Path(config.HUNYUAN_RUNNER)
+HUNYUAN_MV_MODEL=Path(config.HUNYUAN_MV_MODEL)
+HUNYUAN_MV_RUNNER=Path(config.HUNYUAN_MV_RUNNER)
 HUNYUAN_MV_WEIGHTS=HUNYUAN_MV_MODEL/'hunyuan3d-dit-v2-mv/model.fp16.safetensors'
 HUNYUAN_MV_EXPECTED_BYTES=4_928_151_562
-SF3D_PY=LOCAL_ROOT/'stable-fast-3d/.venv-runtime/Scripts/python.exe'
-SF3D_REPO=LOCAL_ROOT/'stable-fast-3d'
-TRIPOSR_PY=LOCAL_ROOT/'TripoSR/.venv-runtime/Scripts/python.exe'
-TRIPOSR_REPO=LOCAL_ROOT/'TripoSR'
-BLENDER=LOCAL_ROOT/'Blender52/blender.exe'
-BLENDER_RENDERER=ROOT/'pipeline/blender_render_job.py'
-BLENDER_REFINER=ROOT/'pipeline/blender_auto_refine.py'
-BLENDER_STL_EXPORTER=ROOT/'pipeline/blender_export_stl.py'
+SF3D_PY=Path(config.SF3D_PY)
+SF3D_REPO=Path(config.SF3D_REPO)
+TRIPOSR_PY=Path(config.TRIPOSR_PY)
+TRIPOSR_REPO=Path(config.TRIPOSR_REPO)
+BLENDER=Path(config.BLENDER)
+BLENDER_RENDERER=Path(config.BLENDER_RENDERER)
+BLENDER_REFINER=Path(config.BLENDER_REFINER)
+BLENDER_STL_EXPORTER=Path(config.BLENDER_STL_EXPORTER)
 
 class BackendError(RuntimeError):pass
 class CancelledError(RuntimeError):pass

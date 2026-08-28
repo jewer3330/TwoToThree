@@ -1,16 +1,18 @@
 from __future__ import annotations
-import asyncio, json, mimetypes, os, random, re, shutil, threading
+import asyncio, json, mimetypes, os, random, re, secrets, shutil, threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any,Literal
 import psutil
-from fastapi import FastAPI,File,HTTPException,Query,Request,UploadFile
+from fastapi import Depends,FastAPI,File,Header,HTTPException,Query,Request,UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse,Response,StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from PIL import Image,ImageDraw,UnidentifiedImageError
 from pydantic import BaseModel,Field
 from .core import DATA,ROOT,db,dump,init_db,load,now,project_dir,resolve_storage,rowdict,sha256,slugify,storage_path,uid
+from . import config as server_config
+from .storage import storage
 from .worker import STAGES,launch
 from .backends import capabilities,refine_blender,generate_hunyuan,generate_hunyuan_multiview,export_stl_blender,BackendError,CancelledError
 from .detail_provider import generate as generate_detail_candidate,stop_server as stop_detail_server
@@ -128,7 +130,7 @@ def create_part_job(body:PartGenerationInput):
     if not capabilities().get('hunyuan3dMultiview'):raise HTTPException(503,'本机 Hunyuan3D-2mv 不可用')
     job_id=uid('part');job={'id':job_id,'partId':body.partId,'status':'queued','progress':2,'message':'任务已进入本地 GPU 队列','candidateUrl':None,'seed':body.seed if body.seed is not None else random.randint(1,2**31-1),'logs':[],'createdAt':now()}
     with _part_jobs_lock:_part_jobs[job_id]=job
-    threading.Thread(target=_run_part_job,args=(job_id,body),daemon=True,name=f'part-{job_id}').start()
+    if server_config.WORKER_MODE!='remote':threading.Thread(target=_run_part_job,args=(job_id,body),daemon=True,name=f'part-{job_id}').start()
     return _part_job_json(job)
 
 @app.get('/api/parts/jobs/{job_id}')
@@ -376,6 +378,19 @@ def retry(jid:str):
 def confirm_geometry(jid:str):
     snapshot=job_json(jid)
     if snapshot['status']!='awaiting_geometry_confirmation':raise HTTPException(409,'任务尚未进入几何确认阶段')
+    if server_config.WORKER_MODE=='remote':
+        # 远程模式：web_optimization 为空操作，确认后直接完成
+        with db() as con:
+            job=con.execute('SELECT * FROM jobs WHERE id=?',(jid,)).fetchone()
+            web_glb=project_dir(job['project_id'])/'versions'/job['version_id']/'models'/'web.glb'
+            size=f'{web_glb.stat().st_size/1048576:.2f} MB' if web_glb.exists() else 'unknown'
+            quality={'scores':{'轮廓匹配':0,'比例一致性':0,'正面可信度':0,'侧面可信度':0,'背面可信度':0},'stats':{'fileSize':size,'backend':job['actual_backend']},'differences':[{'severity':'info','message':'自动视觉评分尚未接入；请依据四视图和交互模型人工验收。'}],'approximations':[{'region':'未提供视角覆盖的隐藏区域','confidence':0.5,'note':'单图生成结果需要人工复核'}]}
+            stamp=now()
+            con.execute("UPDATE stages SET status='passed',completed_at=? WHERE job_id=? AND stage_key='web_optimization'",(stamp,jid))
+            con.execute("UPDATE jobs SET status='completed',current_stage='web_optimization',completed_at=? WHERE id=?",(stamp,jid))
+            con.execute('UPDATE projects SET status=?,passed_stages=?,total_stages=?,updated_at=? WHERE id=?',('ready_for_review',len(STAGES),len(STAGES),stamp,job['project_id']))
+            con.execute("UPDATE versions SET status='ready_for_review',quality_report=? WHERE id=?",(dump(quality),job['version_id']))
+        return job_json(jid)
     with db() as con:
         con.execute("UPDATE jobs SET status='queued',current_stage='web_optimization' WHERE id=?",(jid,))
         con.execute("UPDATE projects SET status='rendering_review',updated_at=? WHERE current_job_id=?",(now(),jid))
@@ -502,7 +517,7 @@ def create_refinement(body:RefinementInput):
     if not body.modules:raise HTTPException(422,'至少选择一个精修模块')
     jid=uid('ref');stamp=now();states={m:'pending' for m in body.modules};logs=[f'[{stamp[11:19]}] 精修任务创建，源版本 v{source["number"]:03d} 已锁定']
     with db() as con:con.execute('INSERT INTO refinement_jobs(id,project_id,source_version_id,output_version_id,status,config,module_states,logs,created_at) VALUES(?,?,?,?,?,?,?,?,?)',(jid,source['projectId'],body.sourceVersionId,None,'queued',dump(body.model_dump()),dump(states),dump(logs),stamp));con.execute("UPDATE projects SET status='revision_requested',updated_at=? WHERE id=?",(stamp,source['projectId']))
-    threading.Thread(target=run_refinement,args=(jid,),daemon=True).start()
+    if server_config.WORKER_MODE!='remote':threading.Thread(target=run_refinement,args=(jid,),daemon=True).start()
     with db() as con:r=con.execute('SELECT * FROM refinement_jobs WHERE id=?',(jid,)).fetchone()
     return refinement_json(r)
 def run_refinement(jid):
@@ -689,7 +704,7 @@ def create_revision(body:RevisionCreateInput):
         for c in selected:
             con.execute('INSERT INTO revision_comment_links VALUES(?,?,?,?,?,?,?,?,?)',(uid('rcl'),request_id,c['id'],body.sourceVersionId,None,None,None,stamp,None))
             con.execute("UPDATE version_comments SET status='planned',updated_at=? WHERE id=?",(stamp,c['id']))
-    threading.Thread(target=run_revision,args=(request_id,),daemon=True).start()
+    if server_config.WORKER_MODE!='remote':threading.Thread(target=run_revision,args=(request_id,),daemon=True).start()
     return revision_json(request_id)
 
 def revision_json(rid):
@@ -844,7 +859,7 @@ def create_detail_job(plan_id:str,body:DetailJobInput):
         for region in regions:
             evidence='designed' if plan['mode']=='creative' else ('inferred' if region['evidence_level']=='inferred' else 'constrained')
             for index in range(1,body.candidateCount+1):con.execute('INSERT INTO detail_candidate_groups VALUES(?,?,?,?,?,?,?,?,?,?)',(uid('dcg'),job_id,region['id'],index,'draft',evidence,region['target_usage'],dump({'status':'pending_generation'}),None,None))
-    threading.Thread(target=run_detail_job,args=(job_id,),daemon=True,name=f'detail-{job_id}').start()
+    if server_config.WORKER_MODE!='remote':threading.Thread(target=run_detail_job,args=(job_id,),daemon=True,name=f'detail-{job_id}').start()
     return detail_job_json(job_id)
 
 def run_detail_job(job_id:str):
@@ -951,7 +966,123 @@ def reference_set_consumption(rid:str):
 @app.get('/api/reference-sets/{rid}/consumption-map')
 def get_reference_consumption(rid:str):return reference_set_consumption(rid)
 
+
+# --------------------------------------------------------------------------- #
+# 远端 Worker 接口（总控 + OSS + 显卡机器）
+# --------------------------------------------------------------------------- #
+def _require_worker(x_worker_token:str=Header(default='',alias='X-Worker-Token')):
+    if not server_config.WORKER_TOKEN:raise HTTPException(503,'远端 Worker 未启用（缺少 WORKER_TOKEN）')
+    if not secrets.compare_digest(x_worker_token,server_config.WORKER_TOKEN):raise HTTPException(401,'Worker token 无效')
+
+def _resolve_source_images(job:dict[str,Any])->dict[str,Any]:
+    """按 worker.run 相同规则解析 front/side/back 素材（校验哈希）。"""
+    config=load(job['config_snapshot'],{});consumption=config.get('referenceSetConsumption');by_role={}
+    if consumption:
+        if consumption.get('warnings'):raise HTTPException(409,'; '.join(consumption['warnings']))
+        with db() as con:
+            for role,item in consumption.get('hunyuanInputs',{}).items():
+                row=con.execute('SELECT * FROM assets WHERE id=? AND project_id=?',(item['assetId'],job['project_id'])).fetchone()
+                if not row or row['sha256']!=item['sha256']:raise HTTPException(409,f'Reference Set 输入 {role} 缺失或哈希不一致')
+                by_role[role]=dict(row)
+    else:
+        with db() as con:
+            rows=con.execute("SELECT * FROM assets WHERE project_id=? AND role IN ('front','side','back') AND active=1 ORDER BY created_at DESC",(job['project_id'],)).fetchall()
+            by_role={a['role']:dict(a) for a in rows}
+    return by_role
+
+def _oss_asset_key(a:dict[str,Any])->str:
+    return f"projects/{a['project_id']}/assets/{a['id']}{Path(a['storage_path']).suffix}"
+
+def _prepare_asset_input(oss,a:dict[str,Any])->dict[str,Any]:
+    key=_oss_asset_key(a)
+    if not oss.exists(key):oss.upload(resolve_storage(a['storage_path']),key)
+    return {'role':a['role'],'originalName':a['original_name'],'mimeType':a['mime_type'],'sha256':a['sha256'],'ossKey':key,'url':oss.sign_get(key)}
+
+class WorkerArtifact(BaseModel):
+    kind:str;label:str;relPath:str;mimeType:str;byteSize:int;sha256:str;metadata:dict={}
+class GenerateComplete(BaseModel):
+    actualBackend:str;modelVersion:str|None=None;geometryMetrics:dict|None=None;artifacts:list[WorkerArtifact]
+class StageReport(BaseModel):
+    stage:str;status:str;label:str|None=None;message:str|None=None;warnings:list[str]=[]
+class LogInput(BaseModel):
+    message:str
+class FailInput(BaseModel):
+    error:str;stage:str|None=None
+
+@app.post('/api/worker/generate/claim')
+def worker_claim(_=Depends(_require_worker)):
+    with db() as con:
+        row=con.execute("SELECT * FROM jobs WHERE status='queued' ORDER BY created_at LIMIT 1").fetchone()
+        if not row:return {}
+        cur=con.execute("UPDATE jobs SET status='running',started_at=COALESCE(started_at,?) WHERE id=? AND status='queued'",(now(),row['id']))
+        if cur.rowcount!=1:return {}
+        job=dict(row);project=con.execute('SELECT subject_type FROM projects WHERE id=?',(job['project_id'],)).fetchone()
+    by_role=_resolve_source_images(job)
+    if not by_role.get('front'):raise HTTPException(409,'缺少正面素材')
+    oss=storage.oss();source_images={role:_prepare_asset_input(oss,a) for role,a in by_role.items()}
+    return {'type':'generate','jobId':job['id'],'projectId':job['project_id'],'versionId':job['version_id'],'attempt':job['attempt'],'seed':job['seed'],'subjectType':project['subject_type'],'config':load(job['config_snapshot'],{}),'sourceImages':source_images}
+
+@app.post('/api/worker/generate/{jid}/stage',status_code=204)
+def worker_stage(jid:str,body:StageReport,_=Depends(_require_worker)):
+    with db() as con:
+        job=con.execute('SELECT * FROM jobs WHERE id=?',(jid,)).fetchone()
+        if not job:raise HTTPException(404,'任务不存在')
+        job=dict(job)
+    from .worker import state_for as _state_for
+    stamp=now();to_emit=None
+    with db() as con:
+        if body.status=='running':
+            con.execute("UPDATE stages SET status='running',started_at=? WHERE job_id=? AND stage_key=?",(stamp,jid,body.stage));con.execute('UPDATE jobs SET current_stage=? WHERE id=?',(body.stage,jid));con.execute('UPDATE projects SET status=?,updated_at=? WHERE id=?',(_state_for(body.stage),stamp,job['project_id']))
+            to_emit=('stage.started',{'stage':body.stage,'label':body.label or body.stage})
+        elif body.status=='passed':
+            con.execute("UPDATE stages SET status='passed',completed_at=? WHERE job_id=? AND stage_key=?",(stamp,jid,body.stage));passed=con.execute("SELECT COUNT(*) FROM stages WHERE job_id=? AND status='passed'",(jid,)).fetchone()[0];con.execute('UPDATE projects SET passed_stages=?,updated_at=? WHERE id=?',(passed,stamp,job['project_id']))
+            to_emit=('stage.completed',{'stage':body.stage,'status':'passed','warnings':body.warnings})
+        elif body.status=='failed':
+            con.execute("UPDATE stages SET status='failed',completed_at=? WHERE job_id=? AND stage_key=?",(stamp,jid,body.stage))
+            to_emit=('stage.failed',{'stage':body.stage,'error':body.message})
+    if to_emit:
+        with db() as con:con.execute('INSERT INTO events(job_id,event_type,payload,created_at) VALUES(?,?,?,?)',(jid,to_emit[0],dump(to_emit[1]),stamp))
+    if body.message:
+        with db() as con:con.execute('INSERT INTO events(job_id,event_type,payload,created_at) VALUES(?,?,?,?)',(jid,'stage.log',dump({'message':f'[{stamp[11:19]}] {body.message}'}),stamp))
+
+@app.post('/api/worker/generate/{jid}/log',status_code=204)
+def worker_log(jid:str,body:LogInput,_=Depends(_require_worker)):
+    with db() as con:con.execute('INSERT INTO events(job_id,event_type,payload,created_at) VALUES(?,?,?,?)',(jid,'stage.log',dump({'message':f'[{now()[11:19]}] {body.message}'}),now()))
+
+@app.post('/api/worker/generate/{jid}/complete')
+def worker_complete(jid:str,body:GenerateComplete,_=Depends(_require_worker)):
+    oss=storage.oss()
+    with db() as con:
+        job=con.execute('SELECT * FROM jobs WHERE id=?',(jid,)).fetchone()
+        if not job:raise HTTPException(404,'任务不存在')
+        job=dict(job)
+    version_root=project_dir(job['project_id'])/'versions'/job['version_id']
+    for a in body.artifacts:
+        rel=Path(a.relPath);local=version_root/rel;local.parent.mkdir(parents=True,exist_ok=True);oss.download(a.ossKey,local);digest=sha256(local)
+        if digest!=a.sha256:raise HTTPException(422,f'产物校验失败：{a.label}')
+        aid=uid('art');storage_rel=storage_path(local)
+        with db() as con:con.execute('INSERT INTO artifacts VALUES(?,?,?,?,?,?,?,?,?,?,?)',(aid,jid,job['version_id'],a.kind,a.label,storage_rel,a.mimeType,a.byteSize,digest,dump(a.metadata),now()))
+    stamp=now()
+    with db() as con:
+        con.execute('UPDATE jobs SET actual_backend=?,model_version=? WHERE id=?',(body.actualBackend,body.modelVersion,jid));con.execute('UPDATE projects SET actual_backend=? WHERE id=?',(body.actualBackend,job['project_id']))
+        if body.geometryMetrics is not None:
+            con.execute("UPDATE jobs SET status='awaiting_geometry_confirmation',current_stage='geometry_confirmation' WHERE id=?",(jid,))
+            con.execute("UPDATE projects SET status='awaiting_geometry_confirmation',updated_at=? WHERE id=?",(stamp,job['project_id']))
+            con.execute("UPDATE versions SET status='awaiting_geometry_confirmation',quality_report=? WHERE id=?",(dump({'geometryMetrics':body.geometryMetrics}),job['version_id']))
+            with db() as _c:_c.execute('INSERT INTO events(job_id,event_type,payload,created_at) VALUES(?,?,?,?)',(jid,'job.status',dump({'status':'awaiting_geometry_confirmation','geometryMetrics':body.geometryMetrics}),stamp))
+    return {'status':'awaiting_geometry_confirmation' if body.geometryMetrics is not None else 'completed','jobId':jid}
+
+@app.post('/api/worker/generate/{jid}/fail')
+def worker_fail(jid:str,body:FailInput,_=Depends(_require_worker)):
+    stamp=now()
+    with db() as con:
+        con.execute("UPDATE jobs SET status='failed',error_code='WORKER_ERROR',error_summary=?,completed_at=? WHERE id=?",(body.error,stamp,jid));con.execute("UPDATE projects SET status='failed',updated_at=? WHERE current_job_id=?",(stamp,jid));con.execute('INSERT INTO events(job_id,event_type,payload,created_at) VALUES(?,?,?,?)',(jid,'stage.failed',dump({'error':body.error,'stage':body.stage}),stamp))
+    return {'status':'failed','jobId':jid}
+
+
 def seed_demo():
+    src=ROOT/'public'/'models'/'yoyo-front-projection-v1.glb'
+    if not src.exists():return
     with db() as con:
         if con.execute('SELECT COUNT(*) FROM projects').fetchone()[0]:return
         pid='prj_0000000000000001';stamp=now();thumb='/public/yoyo-reference.png';con.execute('INSERT INTO projects(id,slug,name,subject_type,intended_use,quality,status,passed_stages,total_stages,actual_backend,thumbnail_url,settings,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)',(pid,'yoyo-demo','YOYO · 星空信使','character','web','high','ready_for_review',9,9,'Hunyuan3D + Blender',thumb,'{}',stamp,stamp));vid='ver_0000000000000001';jid='job_0000000000000001';con.execute('INSERT INTO versions VALUES(?,?,?,?,?,?,?)',(vid,pid,1,'v001 · 参考图投射基线','ready_for_review',dump({'scores':{'轮廓匹配':92,'比例一致性':95,'正面可信度':94,'侧面可信度':79,'背面可信度':72},'stats':{'fileSize':'16.7 MB','maxTexture':'2048 × 2048'},'differences':[{'severity':'minor','message':'背面披风厚度来自推断。'}],'approximations':[{'region':'背面','confidence':.72,'note':'参考证据有限'}]}),stamp));con.execute('INSERT INTO jobs VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',(jid,pid,vid,'completed','{}','hunyuan3d','Hunyuan3D + Blender','2.1',42,'web_optimization',1,stamp,stamp,stamp,None,None,0));con.execute('UPDATE projects SET current_job_id=? WHERE id=?',(jid,pid));src=ROOT/'public'/'models'/'yoyo-front-projection-v1.glb';con.execute('INSERT INTO artifacts VALUES(?,?,?,?,?,?,?,?,?,?,?)',('art_0000000000000001',jid,vid,'glb','yoyo-front-projection-v1.glb',src.relative_to(ROOT).as_posix(),'model/gltf-binary',src.stat().st_size,sha256(src),dump({'backend':'Hunyuan3D + Blender','baseline':True}),stamp))

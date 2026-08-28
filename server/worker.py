@@ -2,6 +2,7 @@ from __future__ import annotations
 import json, math, struct, threading, time
 from pathlib import Path
 from .core import ROOT,db,dump,now,project_dir,resolve_storage,sha256,storage_path,uid
+from . import config
 from .backends import BackendError,CancelledError,capabilities,generate_hunyuan,generate_hunyuan_multiview,generate_sf3d,generate_triposr,render_blender
 
 STAGES=[('intake','素材接收'),('analysis','主体分析'),('geometry','几何生成'),('glb_validation','GLB 检查'),('multi_view_render','Blender 标准化与四视图'),('web_optimization','Web GLB 输出')]
@@ -160,4 +161,6 @@ def run(job_id:str):
         log(job_id,f'任务失败：{exc}');emit(job_id,'stage.failed',{'error':str(exc)})
 def state_for(stage):return {'intake':'queued','analysis':'generating_geometry','geometry':'generating_geometry','glb_validation':'validating_glb','multi_view_render':'rendering_review','visual_review':'rendering_review','manual_refine':'awaiting_manual_refine','materials':'processing_materials','web_optimization':'optimizing_web'}.get(stage,'queued')
 def launch(job_id):
+    if config.WORKER_MODE == 'remote':
+        return  # 任务停留在 queued，等待显卡机 worker 认领
     t=threading.Thread(target=run,args=(job_id,),daemon=True,name=f'studio-{job_id}');_threads[job_id]=t;t.start()
