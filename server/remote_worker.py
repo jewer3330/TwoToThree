@@ -120,6 +120,7 @@ def _process_generate(client: Client, task: dict, oss: OssStorage) -> None:
             "kind": art.kind,
             "label": art.label,
             "relPath": rel,
+            "ossKey": key,
             "mimeType": art.mime,
             "byteSize": art.path.stat().st_size,
             "sha256": sha256(art.path),

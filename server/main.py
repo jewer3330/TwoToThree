@@ -999,7 +999,7 @@ def _prepare_asset_input(oss,a:dict[str,Any])->dict[str,Any]:
     return {'role':a['role'],'originalName':a['original_name'],'mimeType':a['mime_type'],'sha256':a['sha256'],'ossKey':key,'url':oss.sign_get(key)}
 
 class WorkerArtifact(BaseModel):
-    kind:str;label:str;relPath:str;mimeType:str;byteSize:int;sha256:str;metadata:dict={}
+    kind:str;label:str;relPath:str;ossKey:str;mimeType:str;byteSize:int;sha256:str;metadata:dict={}
 class GenerateComplete(BaseModel):
     actualBackend:str;modelVersion:str|None=None;geometryMetrics:dict|None=None;artifacts:list[WorkerArtifact]
 class StageReport(BaseModel):
@@ -1069,7 +1069,7 @@ def worker_complete(jid:str,body:GenerateComplete,_=Depends(_require_worker)):
             con.execute("UPDATE jobs SET status='awaiting_geometry_confirmation',current_stage='geometry_confirmation' WHERE id=?",(jid,))
             con.execute("UPDATE projects SET status='awaiting_geometry_confirmation',updated_at=? WHERE id=?",(stamp,job['project_id']))
             con.execute("UPDATE versions SET status='awaiting_geometry_confirmation',quality_report=? WHERE id=?",(dump({'geometryMetrics':body.geometryMetrics}),job['version_id']))
-            with db() as _c:_c.execute('INSERT INTO events(job_id,event_type,payload,created_at) VALUES(?,?,?,?)',(jid,'job.status',dump({'status':'awaiting_geometry_confirmation','geometryMetrics':body.geometryMetrics}),stamp))
+            con.execute('INSERT INTO events(job_id,event_type,payload,created_at) VALUES(?,?,?,?)',(jid,'job.status',dump({'status':'awaiting_geometry_confirmation','geometryMetrics':body.geometryMetrics}),stamp))
     return {'status':'awaiting_geometry_confirmation' if body.geometryMetrics is not None else 'completed','jobId':jid}
 
 @app.post('/api/worker/generate/{jid}/fail')
