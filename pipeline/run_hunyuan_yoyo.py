@@ -17,8 +17,13 @@ from studio_paths import LOCAL_ROOT  # noqa: E402
 SOURCE_ROOT = LOCAL_ROOT / "Hunyuan3D-2.1-space" / "hy3dshape"
 sys.path.insert(0, str(SOURCE_ROOT))
 
-from hy3dshape.pipelines import Hunyuan3DDiTFlowMatchingPipeline  # noqa: E402
-from hy3dshape.rembg import BackgroundRemover  # noqa: E402
+try:
+    from hy3dshape.pipelines import Hunyuan3DDiTFlowMatchingPipeline  # noqa: E402
+    from hy3dshape.rembg import BackgroundRemover  # noqa: E402
+except ImportError:
+    # 显卡机（Linux）使用官方 hy3dgen（hy3dshape 的规范包名）
+    from hy3dgen.shapegen import Hunyuan3DDiTFlowMatchingPipeline  # noqa: E402
+    from hy3dgen.rembg import BackgroundRemover  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
