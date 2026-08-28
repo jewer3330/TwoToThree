@@ -10,7 +10,8 @@ from fastapi.responses import FileResponse,StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from PIL import Image,UnidentifiedImageError
 from pydantic import BaseModel,Field
-from . import config,storage
+from . import config as server_config
+from .storage import storage
 from .core import DATA,ROOT,db,dump,init_db,load,now,project_dir,rowdict,sha256,slugify,uid
 from .worker import STAGES,emit,launch,state_for
 from .backends import capabilities,refine_blender,CancelledError
@@ -173,7 +174,7 @@ def new_job(pid,config,attempt):
         for i,(key,label) in enumerate(STAGES):con.execute('INSERT INTO stages(id,job_id,stage_key,label,status,position) VALUES(?,?,?,?,?,?)',(uid('stg'),jid,key,label,'pending',i))
         con.execute("UPDATE projects SET status='queued',current_job_id=?,passed_stages=0,total_stages=?,updated_at=? WHERE id=?",(jid,len(STAGES),stamp,pid))
     folder=project_dir(pid)/'versions'/vid;folder.mkdir(parents=True);(folder/'job-config.json').write_text(json.dumps({'schemaVersion':1,'projectId':pid,'versionId':vid,'jobId':jid,'attempt':attempt,**config},ensure_ascii=False,indent=2),encoding='utf-8')
-    if config.WORKER_MODE != 'remote':launch(jid)
+    if server_config.WORKER_MODE != 'remote':launch(jid)
     return job_json(jid)
 def job_json(jid):
     with db() as con:
@@ -274,7 +275,7 @@ def create_refinement(body:RefinementInput):
     if not body.modules:raise HTTPException(422,'至少选择一个精修模块')
     jid=uid('ref');stamp=now();states={m:'pending' for m in body.modules};logs=[f'[{stamp[11:19]}] 精修任务创建，源版本 v{source["number"]:03d} 已锁定']
     with db() as con:con.execute('INSERT INTO refinement_jobs(id,project_id,source_version_id,output_version_id,status,config,module_states,logs,created_at) VALUES(?,?,?,?,?,?,?,?,?)',(jid,source['projectId'],body.sourceVersionId,None,'queued',dump(body.model_dump()),dump(states),dump(logs),stamp));con.execute("UPDATE projects SET status='revision_requested',updated_at=? WHERE id=?",(stamp,source['projectId']))
-    if config.WORKER_MODE != 'remote':threading.Thread(target=run_refinement,args=(jid,),daemon=True).start()
+    if server_config.WORKER_MODE != 'remote':threading.Thread(target=run_refinement,args=(jid,),daemon=True).start()
     with db() as con:r=con.execute('SELECT * FROM refinement_jobs WHERE id=?',(jid,)).fetchone()
     return refinement_json(r)
 def run_refinement(jid):
@@ -342,8 +343,8 @@ def project_refinements(pid:str):
 # 远端 Worker 接口（总控 + OSS + 显卡机器）
 # --------------------------------------------------------------------------- #
 def _require_worker(x_worker_token:str=Header(default='',alias='X-Worker-Token')):
-    if not config.WORKER_TOKEN:raise HTTPException(503,'远端 Worker 未启用（缺少 WORKER_TOKEN）')
-    if not secrets.compare_digest(x_worker_token,config.WORKER_TOKEN):raise HTTPException(401,'Worker token 无效')
+    if not server_config.WORKER_TOKEN:raise HTTPException(503,'远端 Worker 未启用（缺少 WORKER_TOKEN）')
+    if not secrets.compare_digest(x_worker_token,server_config.WORKER_TOKEN):raise HTTPException(401,'Worker token 无效')
 
 def _input_oss_key(a):
     return f"projects/{a['project_id']}/assets/{a['id']}{Path(a['storage_path']).suffix}"

@@ -1,21 +1,24 @@
-"""Generate a geometry-only YOYO candidate with Hunyuan3D 2.1."""
+"""Generate a geometry-only candidate with Hunyuan3D 2.1 (hy3dgen).
+
+适配说明：原 hy3dshape 包已合并入官方 Hunyuan3D-2 仓库的 hy3dgen 包。
+2.1 权重（hunyuan3d-dit-v2-1/model.fp16.ckpt + config.yaml）由
+Hunyuan3DDiTFlowMatchingPipeline.from_pretrained(subfolder='hunyuan3d-dit-v2-1',
+use_safetensors=False) 加载；dit ckpt 内已含 model/vae/conditioner 三个分量。
+"""
 
 from __future__ import annotations
 
 import argparse
-import sys
 from pathlib import Path
 
 import torch
 from PIL import Image
 
+from hy3dgen.rembg import BackgroundRemover
+from hy3dgen.shapegen import Hunyuan3DDiTFlowMatchingPipeline
+
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE_ROOT = ROOT / ".local" / "Hunyuan3D-2.1-space" / "hy3dshape"
-sys.path.insert(0, str(SOURCE_ROOT))
-
-from hy3dshape.pipelines import Hunyuan3DDiTFlowMatchingPipeline  # noqa: E402
-from hy3dshape.rembg import BackgroundRemover  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
@@ -41,23 +44,13 @@ def main() -> None:
     if image.getextrema()[3] == (255, 255):
         image = BackgroundRemover()(image.convert("RGB"))
 
-    # Load on CPU first: loading the complete 3.3B pipeline directly on an
-    # 8 GB GPU can OOM before Accelerate has a chance to install offload hooks.
     pipeline = Hunyuan3DDiTFlowMatchingPipeline.from_pretrained(
-        str(args.model), device="cpu", dtype=torch.float16
+        str(args.model),
+        subfolder="hunyuan3d-dit-v2-1",
+        use_safetensors=False,
+        device="cuda",
+        dtype=torch.float16,
     )
-    # Hunyuan3D 2.1 ships a lightweight custom pipeline rather than a
-    # Diffusers DiffusionPipeline subclass, while its offload helper expects
-    # the standard component mapping.
-    pipeline.components = {
-        "conditioner": pipeline.conditioner,
-        "model": pipeline.model,
-        "vae": pipeline.vae,
-    }
-    pipeline.enable_model_cpu_offload()
-    # Offload hooks move modules on demand, but this custom pipeline still
-    # reads self.device when creating latents and scheduler tensors.
-    pipeline.device = torch.device("cuda")
     generator = torch.Generator(device="cuda").manual_seed(args.seed)
     mesh = pipeline(
         image=image,
@@ -66,7 +59,7 @@ def main() -> None:
         num_chunks=4000,
         generator=generator,
     )[0]
-    mesh.export(args.output)
+    mesh.export(str(args.output))
     print(f"exported={args.output}")
     print(f"vertices={len(mesh.vertices)} faces={len(mesh.faces)}")
 
