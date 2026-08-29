@@ -267,19 +267,44 @@ def probe_host(cfg:dict)->dict:
     if not r:return {'online':False,'gpu':None,'memTotal':None,'memUsed':None,'diskFree':None,'latencyMs':None,'route':None,'caps':{},'lastError':'no remote'}
     result={'online':False,'gpu':None,'memTotal':None,'memUsed':None,'diskFree':None,'latencyMs':None,'route':None,'caps':{},'lastError':None}
     try:
+        # 单次 SSH 往返拿 GPU+磁盘+能力（relay 慢时减少往返次数）
+        rc=_rc()
+        checks=[rc['python'],rc['model'],rc['runner'],rc['sf3d_py'],rc['sf3d_repo'],
+                rc['triposr_py'],rc['triposr_repo'],rc['blender'],rc['renderer'],
+                rc['refiner'],rc['stl_exporter']]
+        probe_caps=';'.join(f"Write-Output (Test-Path '{p}')" for p in checks)
+        disk_letter=cfg.get('work','D:')[0]
+        script=(f"$g=(& nvidia-smi --query-gpu=name,memory.total,memory.used --format=csv,noheader,nounits) 2>$null; "
+                f"Write-Output ('GPU:'+$g); "
+                f"$f=(Get-PSDrive -Name {disk_letter} -ErrorAction SilentlyContinue).Free; "
+                f"Write-Output ('DISK:'+$f); {probe_caps}")
         t0=time.monotonic()
-        out=r.cmd(['nvidia-smi','--query-gpu=name,memory.total,memory.used','--format=csv,noheader,nounits'])
+        out=r.cmd(['powershell','-NoProfile','-Command',script],timeout=40)
         result['latencyMs']=round((time.monotonic()-t0)*1000)
-        line=out.stdout.strip().splitlines()[0] if out.stdout.strip() else ''
-        if line:
-            parts=[p.strip() for p in line.split(',')]
-            if len(parts)>=3:
-                result['gpu']=parts[0];result['memTotal']=int(parts[1]);result['memUsed']=int(parts[2])
-        result['online']=bool(result['gpu'])
-        disk=r.cmd(['powershell','-NoProfile','-Command',f"Get-PSDrive -Name {cfg.get('work','D:')[0]} | Select-Object -ExpandProperty Free"])
-        free=disk.stdout.strip()
-        if free:result['diskFree']=round(float(free)/1073741824,1)
-        result['caps']=_remote_capabilities(r)
+        if out.returncode==0:
+            gpu_line=next((l for l in out.stdout.splitlines() if l.startswith('GPU:')),'')
+            gpu_data=gpu_line[4:].strip()
+            if gpu_data:
+                parts=[p.strip() for p in gpu_data.split(',')]
+                if len(parts)>=3:
+                    result['gpu']=parts[0];result['memTotal']=int(parts[1]);result['memUsed']=int(parts[2])
+            result['online']=bool(result['gpu'])
+            disk_line=next((l for l in out.stdout.splitlines() if l.startswith('DISK:')),'')
+            free=disk_line[5:].strip()
+            if free:
+                try:result['diskFree']=round(float(free)/1073741824,1)
+                except Exception:pass
+            flags=[l.strip().lower()=='true' for l in out.stdout.splitlines() if l.strip()]
+            # 前两行是 GPU:/DISK:，之后才是能力 Test-Path 结果
+            cap_lines=[l for l in out.stdout.splitlines() if l.strip() and not l.startswith('GPU:') and not l.startswith('DISK:')]
+            flags2=[l.strip().lower()=='true' for l in cap_lines]
+            cap_map=[('hunyuan3d',0),('hunyuan3d',1),('hunyuan3d',2),('sf3d',3),('sf3d',4),
+                     ('triposr',5),('triposr',6),('blender',7),('blender',8),
+                     ('blenderRefinement',7),('blenderRefinement',9),('blenderStlExport',7),('blenderStlExport',10)]
+            caps={c:False for c in ('hunyuan3d','hunyuan3dMultiview','sf3d','triposr','blender','blenderRefinement','blenderStlExport')}
+            for cap,idx in cap_map:
+                if idx<len(flags2) and flags2[idx]:caps[cap]=True
+            result['caps']=caps
     except Exception as exc:
         result['lastError']=str(exc)[:200]
     return result

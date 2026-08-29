@@ -1,4 +1,4 @@
-import {Activity, ArrowLeft, Boxes, ChevronRight, Cpu, FolderKanban, Gauge, HardDrive, Home, Layers3, Menu, Plus, Printer as PrinterIcon, Scissors, Search, Settings, Sparkles} from 'lucide-react';
+import {Activity, ArrowLeft, Boxes, ChevronRight, Cpu, FolderKanban, Gauge, HardDrive, Home, Layers3, Menu, Plus, Printer as PrinterIcon, Scissors, Search, Settings, SlidersHorizontal, Sparkles} from 'lucide-react';
 import {Link, NavLink, Navigate, Route, Routes, useLocation, useNavigate} from 'react-router-dom';
 import Dashboard from './pages/Dashboard';
 import CreateProject from './pages/CreateProject';
@@ -20,7 +20,7 @@ import GpuConsolePage from './pages/GpuConsolePage';
 import PrinterConsolePage from './pages/PrinterConsolePage';
 import PrintWorkflowPage from './pages/PrintWorkflowPage';
 
-const nav=[['/',Home,'工作台'],['/projects',FolderKanban,'项目管理'],['/parts-lab',Scissors,'部件切分实验'],['/assets',Layers3,'素材管理'],['/queue',Activity,'任务队列'],['/gpu',Cpu,'GPU 控制台'],['/printer',PrinterIcon,'打印机'],['/print-workflow',PrinterIcon,'打印工作台'],['/library',Boxes,'模型 / 资产库'],['/settings',Settings,'系统设置']] as const;
+const nav=[['/',Home,'工作台'],['/projects',FolderKanban,'项目管理'],['/parts-lab',Scissors,'部件切分实验'],['/assets',Layers3,'素材管理'],['/queue',Activity,'任务队列'],['/gpu',Cpu,'GPU 控制台'],['/printer',PrinterIcon,'打印机'],['/print-workflow',SlidersHorizontal,'打印工作台'],['/library',Boxes,'模型 / 资产库'],['/settings',Settings,'系统设置']] as const;
 function Placeholder({title}:{title:string}){return <div className="empty"><Boxes/><h2>{title}</h2><p>该入口将在后续版本开放，当前 MVP 聚焦完整转换与验收流程。</p></div>}
 const pageNames: Array<[RegExp,string]> = [
   [/^\/create$/, '新建项目'], [/^\/validation\//, '素材校验'], [/^\/plan\//, '方案确认'],
