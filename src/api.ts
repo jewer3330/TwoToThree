@@ -13,6 +13,9 @@ import type {
   GpuHost,
   GpuQueueView,
   GpuOverview,
+  Printer,
+  PrinterOverview,
+  PrinterStatus,
 } from "./types";
 const json = async <T>(r: Response): Promise<T> => {
   if (!r.ok) {
@@ -293,4 +296,13 @@ export const api = {
   gpuToggleHost: (id: string) => fetch(`/api/gpu/hosts/${id}/toggle`, { method: "POST" }).then(json<GpuHost>),
   gpuSetPaused: (paused: boolean) =>
     fetch("/api/gpu/queue/pause", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ paused }) }).then(json<{paused:boolean}>),
+  printers: () => fetch("/api/printer/printers").then(json<Printer[]>),
+  printerOverview: () => fetch("/api/printer/overview").then(json<PrinterOverview>),
+  printerAdd: (body: unknown) =>
+    fetch("/api/printer/printers", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }).then(json<Printer>),
+  printerPatch: (id: string, body: unknown) =>
+    fetch(`/api/printer/printers/${id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }).then(json<Printer>),
+  printerDelete: (id: string) => fetch(`/api/printer/printers/${id}`, { method: "DELETE" }),
+  printerProbe: (id: string) => fetch(`/api/printer/printers/${id}/probe`, { method: "POST" }).then(json<{ok:boolean;status?:PrinterStatus}>),
+  printerToggle: (id: string) => fetch(`/api/printer/printers/${id}/toggle`, { method: "POST" }).then(json<Printer>),
 };

@@ -2292,3 +2292,40 @@ main {
 .gpu-q-item small{color:#f87171;font-size:11px}
 .gpu-q-item.failed{border-color:#f8717144}
 .gpu-q-item.completed{border-color:#34d39944}
+
+/* ===== 打印机管理 ===== */
+.printer-console .printer-stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;margin:16px 0}
+.printer-stat{display:flex;flex-direction:column;gap:2px;padding:14px;border-radius:12px;background:var(--surface,#151a23);border:1px solid var(--border,#232a37)}
+.printer-stat svg{opacity:.7}
+.printer-stat b{font-size:20px}
+.printer-stat span{font-size:12px;color:var(--muted,#7d8590)}
+.printer-stat.ok b{color:#34d399}
+.printer-stat.printing b{color:#22d3ee}
+.printer-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:14px;margin-bottom:20px}
+.printer-card{border-radius:14px;padding:14px;background:var(--surface,#151a23);border:1px solid var(--border,#232a37);display:flex;flex-direction:column;gap:10px}
+.printer-card.offline{opacity:.6}
+.printer-card.disabled{border-style:dashed}
+.printer-head{display:flex;align-items:center;gap:8px}
+.printer-head b{flex:1}
+.printer-model{font-size:11px;padding:1px 8px;border-radius:8px;background:#0ea5e922;color:#7dd3fc}
+.printer-ip{font-size:12px;color:var(--muted,#7d8590)}
+.printer-actions{display:flex;gap:4px;align-items:center}
+.printer-actions button{background:none;border:1px solid var(--border,#232a37);border-radius:8px;padding:3px 6px;color:var(--muted,#7d8590);cursor:pointer;font-size:11px}
+.printer-actions button:hover{color:#fff;border-color:#22d3ee}
+.printer-actions button.danger:hover{border-color:#f87171;color:#f87171}
+.printer-state-dot{width:10px;height:10px;border-radius:50%}
+.printer-state-line{display:flex;align-items:center;gap:8px;font-size:13px;font-weight:600}
+.printer-state-line .gcode-name{font-weight:400;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.printer-progress{height:8px;border-radius:4px;background:#0d1117;overflow:hidden}
+.printer-progress-fill{display:block;height:100%;background:linear-gradient(90deg,#22d3ee,#34d399);transition:width .6s}
+.printer-temps{display:flex;flex-wrap:wrap;gap:8px;font-size:12px;color:var(--muted,#7d8590)}
+.printer-temps span{display:flex;align-items:center;gap:4px}
+.printer-temps b{color:#e2e8f0}
+.printer-foot{display:flex;justify-content:space-between;font-size:11px;color:var(--muted,#7d8590)}
+.printer-error{font-size:11px;color:#f87171;background:#f8717111;border-radius:8px;padding:6px;word-break:break-all}
+.printer-add-form{background:var(--surface,#151a23);border:1px dashed var(--border,#232a37);border-radius:14px;padding:16px;margin-bottom:20px}
+.printer-add-form h3{margin:0 0 12px;font-size:15px}
+.printer-form-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:10px;margin-bottom:14px}
+.printer-field{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--muted,#7d8590)}
+.printer-field input,.printer-field select{background:#0d1117;border:1px solid var(--border,#232a37);border-radius:8px;padding:8px 10px;color:#fff;font-size:13px}
+.printer-hint{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--muted,#7d8590);background:var(--surface,#151a23);border:1px solid var(--border,#232a37);border-radius:12px;padding:10px 14px}

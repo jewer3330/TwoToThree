@@ -68,6 +68,45 @@ export interface GpuOverview {
   runningJobs: number;
   queue: { queued: number; running: number };
 }
+export interface PrinterStatus {
+  state: string;
+  stateLabel: string;
+  progress: number | null;
+  nozzleTemp: number;
+  nozzleTarget: number;
+  bedTemp: number;
+  bedTarget: number;
+  chamberTemp: number;
+  speedLevel: number;
+  layerNum: number;
+  totalLayers: number;
+  wifiSignal: number;
+  remainingSeconds: number;
+  gcodeName: string;
+  fanSpeed: number;
+  hms: unknown[];
+}
+export interface Printer {
+  id: string;
+  name: string;
+  model: string;
+  ip: string;
+  accessCode: string;
+  serial: string;
+  enabled: boolean;
+  createdAt: string;
+  status: {
+    ok?: boolean;
+    error?: string | null;
+    probedAt?: string;
+    status?: PrinterStatus;
+  };
+}
+export interface PrinterOverview {
+  printerCount: number;
+  online: number;
+  printing: number;
+}
 export type ModelStyle = "realistic" | "cartoon" | "chibi";
 export interface StylePreset {
   id: ModelStyle;
