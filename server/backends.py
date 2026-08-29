@@ -1,5 +1,5 @@
 from __future__ import annotations
-import os, subprocess, threading, time
+import base64, json, os, shutil, subprocess, threading, time, uuid
 from pathlib import Path
 from typing import Callable
 from .core import ROOT
@@ -21,10 +21,126 @@ BLENDER_RENDERER=ROOT/'pipeline/blender_render_job.py'
 BLENDER_REFINER=ROOT/'pipeline/blender_auto_refine.py'
 BLENDER_STL_EXPORTER=ROOT/'pipeline/blender_export_stl.py'
 
+# --- 远程执行配置（PRINT3D_MODE=remote 时生效） ---
+MODE=os.environ.get('PRINT3D_MODE','local')
+REMOTE_HOST=os.environ.get('PRINT3D_REMOTE_HOST','')
+REMOTE_USER=os.environ.get('PRINT3D_REMOTE_USER','d0993')
+REMOTE_KEY=os.environ.get('PRINT3D_REMOTE_KEY',str(Path.home()/'.ssh'/'id_ed25519_ai_video'))
+REMOTE_ROOT=os.environ.get('PRINT3D_REMOTE_ROOT',r'D:\print3d\TwoToThree')
+REMOTE_EXT=os.environ.get('PRINT3D_REMOTE_EXT',r'D:\print3d')
+REMOTE_WORK=os.environ.get('PRINT3D_REMOTE_WORK',r'D:\print3d\work')
+
 class BackendError(RuntimeError):pass
 class CancelledError(RuntimeError):pass
 
+def remote():
+    if MODE=='remote' and REMOTE_HOST:
+        return Remote(REMOTE_HOST,REMOTE_USER,Path(REMOTE_KEY),REMOTE_ROOT,REMOTE_EXT,REMOTE_WORK)
+    return None
+
+class Remote:
+    def __init__(self,host,user,key,root,ext,work):
+        self.host=host;self.user=user;self.key=key;self.root=root;self.ext=ext;self.work=work
+        self.base=['ssh','-i',str(key),'-o','BatchMode=yes','-o','ConnectTimeout=15','-o','StrictHostKeyChecking=accept-new',f'{user}@{host}']
+    def _q(self,arg):
+        if '"' in arg:arg=arg.replace('"','\\"')
+        return f'"{arg}"'
+    def run(self,command,log:Callable[[str],None],cancelled:Callable[[],bool],timeout:int=3600,cwd_remote:str|None=None,marker:str=''):
+        remote_cmd=' '.join(self._q(a) for a in command)
+        remote_cmd=f'set STUDIO_EXTERNAL_ROOT={self.ext} && '+remote_cmd
+        if cwd_remote:remote_cmd=f'cd /d {self._q(cwd_remote)} && {remote_cmd}'
+        full=self.base+[remote_cmd]
+        creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0)
+        process=subprocess.Popen(full,cwd=str(ROOT),stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,encoding='utf-8',errors='replace',bufsize=1,creationflags=creationflags)
+        deadline=time.monotonic()+timeout
+        def pump():
+            assert process.stdout
+            for line in process.stdout:
+                line=line.strip()
+                if line and ('%|' not in line or '100%' in line):log(line[-1000:])
+        reader=threading.Thread(target=pump,daemon=True);reader.start()
+        while process.poll() is None:
+            if cancelled():
+                process.terminate()
+                try:process.wait(10)
+                except subprocess.TimeoutExpired:process.kill()
+                self.kill_remote(marker);raise CancelledError('任务已取消，远程子进程已终止')
+            if time.monotonic()>deadline:
+                process.kill();self.kill_remote(marker);raise BackendError(f'命令超过 {timeout} 秒超时')
+            time.sleep(.25)
+        reader.join(timeout=2)
+        if process.returncode:raise BackendError(f'远程命令退出码 {process.returncode}')
+    def kill_remote(self,marker:str):
+        if not marker:return
+        try:
+            clause=marker.replace("'","''")
+            script=f"Get-CimInstance Win32_Process | Where-Object {{ $_.CommandLine -like '*{clause}*' }} | ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force }}"
+            subprocess.run(self.base+self._ps(script),timeout=25,capture_output=True)
+        except Exception:pass
+    def _ps(self,script:str):
+        encoded=base64.b64encode(script.encode('utf-16-le')).decode('ascii')
+        return ['powershell','-NoProfile','-EncodedCommand',encoded]
+    def stage(self,marker:str):return f'{self.work}\\{marker}'
+    def prepare(self,marker:str,locals_:list[Path]):
+        stag=self.stage(marker)
+        self.cmd(['powershell','-NoProfile','-Command',f'New-Item -ItemType Directory -Force -Path {stag} | Out-Null'])
+        for p in locals_:
+            if p.exists():self.upload(p,f'{stag}\\{p.name}')
+    def cmd(self,command):
+        args=' '.join("'"+a.replace("'","''")+"'" for a in command)
+        script=f'[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; & {args}'
+        return subprocess.run(self.base+self._ps(script),capture_output=True,text=True,errors='replace',timeout=300)
+    def upload(self,local:Path,remote_abs:str):
+        self._retry(lambda:subprocess.run(['scp','-q','-i',str(self.key),'-o','BatchMode=yes','-o','StrictHostKeyChecking=accept-new',str(local),f'{self.user}@{self.host}:{remote_abs.replace(chr(92),"/")}'],check=True,timeout=900))
+    def download_dir(self,remote_dir:str,local_dir:Path):
+        local_dir.mkdir(parents=True,exist_ok=True)
+        self._retry(lambda:subprocess.run(['scp','-q','-r','-i',str(self.key),'-o','BatchMode=yes','-o','StrictHostKeyChecking=accept-new',f'{self.user}@{self.host}:{remote_dir.replace(chr(92),"/")}',str(local_dir)],check=True,timeout=1200))
+    def download_file(self,remote_file:str,local_file:Path):
+        local_file.parent.mkdir(parents=True,exist_ok=True)
+        self._retry(lambda:subprocess.run(['scp','-q','-i',str(self.key),'-o','BatchMode=yes','-o','StrictHostKeyChecking=accept-new',f'{self.user}@{self.host}:{remote_file.replace(chr(92),"/")}',str(local_file)],check=True,timeout=1200))
+    def _retry(self,fn,attempts=3):
+        last=None
+        for i in range(attempts):
+            try:return fn()
+            except subprocess.CalledProcessError as exc:
+                last=exc;time.sleep(8*(i+1))
+        raise last
+    def cleanup(self,marker:str):
+        try:self.cmd(['powershell','-NoProfile','-Command',f'Remove-Item -Recurse -Force {self.stage(marker)} -ErrorAction SilentlyContinue'])
+        except Exception:pass
+
+def _flatten(dir_:Path):
+    """scp -r 会把远端目录原样放进目标目录（多一层嵌套），这里把子目录内容上提。"""
+    if not dir_.is_dir():return
+    for child in list(dir_.iterdir()):
+        target=dir_.parent/child.name
+        if target.exists():
+            if target.is_dir():shutil.rmtree(target,ignore_errors=True)
+            else:target.unlink()
+        shutil.move(str(child),str(target))
+
+def _rc():
+    ext=REMOTE_EXT.replace('/','\\')
+    root=REMOTE_ROOT.replace('/','\\')
+    return {
+        'python':ext+r'\local\hunyuan-bootstrap\Scripts\python.exe',
+        'model':ext+r'\local\Hunyuan3D-2.1-model',
+        'runner':root+r'\pipeline\run_hunyuan_yoyo.py',
+        'mv_model':ext+r'\local\Hunyuan3D-2mv-model-v2',
+        'mv_runner':root+r'\pipeline\run_hunyuan_multiview.py',
+        'sf3d_py':ext+r'\local\stable-fast-3d\.venv-runtime\Scripts\python.exe',
+        'sf3d_repo':ext+r'\local\stable-fast-3d',
+        'triposr_py':ext+r'\local\TripoSR\.venv-runtime\Scripts\python.exe',
+        'triposr_repo':ext+r'\local\TripoSR',
+        'blender':ext+r'\local\Blender52\blender.exe',
+        'renderer':root+r'\pipeline\blender_render_job.py',
+        'refiner':root+r'\pipeline\blender_auto_refine.py',
+        'stl_exporter':root+r'\pipeline\blender_export_stl.py',
+    }
+
 def capabilities():
+    if MODE=='remote' and REMOTE_HOST:
+        return _remote_capabilities()
     return {
         'hunyuan3d':HUNYUAN_PY.exists() and HUNYUAN_RUNNER.exists() and HUNYUAN_MODEL.exists(),
         'hunyuan3dMultiview':HUNYUAN_PY.exists() and HUNYUAN_MV_RUNNER.exists() and HUNYUAN_MV_WEIGHTS.exists() and HUNYUAN_MV_WEIGHTS.stat().st_size==HUNYUAN_MV_EXPECTED_BYTES,
@@ -34,6 +150,45 @@ def capabilities():
         'blenderRefinement':BLENDER.exists() and BLENDER_REFINER.exists(),
         'blenderStlExport':BLENDER.exists() and BLENDER_STL_EXPORTER.exists(),
     }
+
+_caps_cache:dict|None=None
+_caps_at=0.0
+def _remote_capabilities():
+    global _caps_cache,_caps_at
+    if _caps_cache and time.monotonic()-_caps_at<10:return _caps_cache
+    rc=_rc();r=remote()
+    checks=[('hunyuan3d',rc['python']),('hunyuan3d',rc['model']),('hunyuan3d',rc['runner']),
+            ('hunyuan3dMultiview',rc['python']),('hunyuan3dMultiview',rc['mv_runner']),('hunyuan3dMultiview',rc['mv_model']),
+            ('sf3d',rc['sf3d_py']),('sf3d',rc['sf3d_repo']),
+            ('triposr',rc['triposr_py']),('triposr',rc['triposr_repo']),
+            ('blender',rc['blender']),('blender',rc['renderer']),
+            ('blenderRefinement',rc['blender']),('blenderRefinement',rc['refiner']),
+            ('blenderStlExport',rc['blender']),('blenderStlExport',rc['stl_exporter'])]
+    wanted={c for c,_ in checks};got=set()
+    try:
+        probe=';'.join(f"Write-Output (Test-Path '{p}')" for _,p in checks)
+        out=r.cmd(['powershell','-NoProfile','-Command',probe])
+        flags=[l.strip().lower()=='true' for l in out.stdout.splitlines() if l.strip()]
+        for (cap,_),ok in zip(checks,flags):
+            if ok:got.add(cap)
+    except Exception:pass
+    caps={c:(c in got) for c in wanted}
+    if caps.get('hunyuan3dMultiview'):
+        try:
+            o=r.cmd(['powershell','-NoProfile','-Command',f"if(Test-Path '{rc['mv_model']}'\\hunyuan3d-dit-v2-mv\\model.fp16.safetensors){{(Get-Item '{rc['mv_model']}'\\hunyuan3d-dit-v2-mv\\model.fp16.safetensors).Length}}else{{0}}"])
+            caps['hunyuan3dMultiview']=caps['hunyuan3dMultiview'] and o.stdout.strip()==str(HUNYUAN_MV_EXPECTED_BYTES)
+        except Exception:pass
+    _caps_cache=caps;_caps_at=time.monotonic();return caps
+
+def remote_gpu()->dict|None:
+    if MODE!='remote' or not REMOTE_HOST:return None
+    r=remote()
+    try:
+        out=r.cmd(['nvidia-smi','--query-gpu=name','--format=csv,noheader'])
+        name=out.stdout.strip().splitlines()[0] if out.stdout.strip() else ''
+        return {'status':'ready' if name else 'unavailable','name':name}
+    except Exception:
+        return {'status':'unavailable','name':None}
 
 def run_process(command:list[str],cwd:Path,log:Callable[[str],None],cancelled:Callable[[],bool],env:dict|None=None,timeout:int=3600):
     creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0)
@@ -57,13 +212,27 @@ def run_process(command:list[str],cwd:Path,log:Callable[[str],None],cancelled:Ca
     reader.join(timeout=2)
     if process.returncode:raise BackendError(f'命令退出码 {process.returncode}')
 
+def _marker():return f'p3d-{uuid.uuid4().hex[:8]}'
+
 def generate_hunyuan(image:Path,output:Path,seed:int,quality:str,log,cancelled):
     steps={'standard':20,'high':30,'ultra':40}.get(quality,20)
     resolution={'standard':256,'high':384,'ultra':512}.get(quality,256)
     processed=output.parent/'condition-front.png'
-    command=[str(HUNYUAN_PY),str(HUNYUAN_RUNNER),'--image',str(image),'--model',str(HUNYUAN_MODEL),'--output',str(output),'--processed-image-output',str(processed),'--steps',str(steps),'--resolution',str(resolution),'--seed',str(seed)]
-    log(f'Hunyuan3D 2.1 启动：steps={steps}, octree={resolution}, seed={seed}')
-    run_process(command,ROOT,log,cancelled,timeout=2400)
+    if MODE!='remote' or not REMOTE_HOST:
+        command=[str(HUNYUAN_PY),str(HUNYUAN_RUNNER),'--image',str(image),'--model',str(HUNYUAN_MODEL),'--output',str(output),'--processed-image-output',str(processed),'--steps',str(steps),'--resolution',str(resolution),'--seed',str(seed)]
+        log(f'Hunyuan3D 2.1 启动：steps={steps}, octree={resolution}, seed={seed}')
+        run_process(command,ROOT,log,cancelled,timeout=2400)
+        if not output.exists():raise BackendError('Hunyuan3D 未生成 GLB')
+        return {'backend':'hunyuan3d','modelVersion':'tencent/Hunyuan3D-2.1','steps':steps,'resolution':resolution,'seed':seed,'processedImage':str(processed),'command':[Path(x).name if i<2 else x for i,x in enumerate(command)]}
+    rc=_rc();r=remote();marker=_marker();stag=r.stage(marker);r.prepare(marker,[image])
+    rimg=f'{stag}\\{image.name}';rout=f'{stag}\\{output.name}';rproc=f'{stag}\\condition-front.png'
+    command=[rc['python'],rc['runner'],'--image',rimg,'--model',rc['model'],'--output',rout,'--processed-image-output',rproc,'--steps',str(steps),'--resolution',str(resolution),'--seed',str(seed)]
+    log(f'Hunyuan3D 2.1 远程启动（{r.host}）：steps={steps}, octree={resolution}, seed={seed}')
+    r.run(command,log,cancelled,timeout=3000,marker=stag)
+    r.download_file(rout,output)
+    try:r.download_file(rproc,processed)
+    except Exception:pass
+    r.cleanup(marker)
     if not output.exists():raise BackendError('Hunyuan3D 未生成 GLB')
     return {'backend':'hunyuan3d','modelVersion':'tencent/Hunyuan3D-2.1','steps':steps,'resolution':resolution,'seed':seed,'processedImage':str(processed),'command':[Path(x).name if i<2 else x for i,x in enumerate(command)]}
 
@@ -75,23 +244,48 @@ def generate_hunyuan_multiview(images:dict[str,Path],output:Path,seed:int,qualit
     if missing:raise BackendError(f'多视图生成缺少视角：{missing}')
     steps={'standard':20,'high':30,'ultra':40}.get(quality,20);resolution={'standard':256,'high':384,'ultra':512}.get(quality,256)
     processed=output.parent/'multiview-conditions'
-    command=[str(HUNYUAN_PY),str(HUNYUAN_MV_RUNNER),'--model',str(HUNYUAN_MV_MODEL),'--output',str(output),'--processed-dir',str(processed),'--steps',str(steps),'--resolution',str(resolution),'--seed',str(seed)]
-    for role in ('front','side','back'):command.extend([f'--{role}',str(images[role])])
-    weights={role:max(0.1,min(3.0,float(view_weights.get(role,1.0)))) for role in ('front','side','back')}
-    for role in ('front','side','back'):command.extend([f'--{role}-weight',str(weights[role])])
-    visual=visual_conditioning or {};mode=str(visual.get('mode','auto')) if visual.get('enabled',True) else 'original';depth_blend=max(0,min(.25,float(visual.get('depthBlend',.15))));command.extend(['--visual-conditioning',mode,'--style',style,'--depth-blend',str(depth_blend)])
-    log(f'Hunyuan3D-2mv 启动：views=front,side,back, weights={weights}, steps={steps}, octree={resolution}, seed={seed}, memory=cpu-load/offload')
-    run_process(command,ROOT,log,cancelled,timeout=2400)
-    if not output.exists():raise BackendError('Hunyuan3D-2mv 未生成 GLB')
-    visual_root=processed/'visual-candidates';report_path=visual_root/'visual-conditioning-report.json';report=__import__('json').loads(report_path.read_text(encoding='utf-8')) if report_path.exists() else {};candidates={role:{name:str(visual_root/role/f'{name}.png') for name in ('original','contour','rgb_depth','depth-cue-experimental')} for role in ('front','side','back')}
+    if MODE!='remote' or not REMOTE_HOST:
+        command=[str(HUNYUAN_PY),str(HUNYUAN_MV_RUNNER),'--model',str(HUNYUAN_MV_MODEL),'--output',str(output),'--processed-dir',str(processed),'--steps',str(steps),'--resolution',str(resolution),'--seed',str(seed)]
+        for role in ('front','side','back'):command.extend([f'--{role}',str(images[role])])
+        weights={role:max(0.1,min(3.0,float(view_weights.get(role,1.0)))) for role in ('front','side','back')}
+        for role in ('front','side','back'):command.extend([f'--{role}-weight',str(weights[role])])
+        visual=visual_conditioning or {};mode=str(visual.get('mode','auto')) if visual.get('enabled',True) else 'original';depth_blend=max(0,min(.25,float(visual.get('depthBlend',.15))));command.extend(['--visual-conditioning',mode,'--style',style,'--depth-blend',str(depth_blend)])
+        log(f'Hunyuan3D-2mv 启动：views=front,side,back, weights={weights}, steps={steps}, octree={resolution}, seed={seed}, memory=cpu-load/offload')
+        run_process(command,ROOT,log,cancelled,timeout=2400)
+        if not output.exists():raise BackendError('Hunyuan3D-2mv 未生成 GLB')
+    else:
+        rc=_rc();r=remote();marker=_marker();stag=r.stage(marker)
+        r.prepare(marker,[images[role] for role in ('front','side','back')])
+        rout=f'{stag}\\{output.name}';rproc=f'{stag}\\multiview-conditions'
+        command=[rc['python'],rc['mv_runner'],'--model',rc['mv_model'],'--output',rout,'--processed-dir',rproc,'--steps',str(steps),'--resolution',str(resolution),'--seed',str(seed)]
+        for role in ('front','side','back'):command.extend([f'--{role}',f'{stag}\\{images[role].name}'])
+        weights={role:max(0.1,min(3.0,float(view_weights.get(role,1.0)))) for role in ('front','side','back')}
+        for role in ('front','side','back'):command.extend([f'--{role}-weight',str(weights[role])])
+        visual=visual_conditioning or {};mode=str(visual.get('mode','auto')) if visual.get('enabled',True) else 'original';depth_blend=max(0,min(.25,float(visual.get('depthBlend',.15))));command.extend(['--visual-conditioning',mode,'--style',style,'--depth-blend',str(depth_blend)])
+        log(f'Hunyuan3D-2mv 远程启动（{r.host}）：views=front,side,back, weights={weights}, steps={steps}, octree={resolution}, seed={seed}')
+        r.run(command,log,cancelled,timeout=3000,marker=stag)
+        r.download_file(rout,output)
+        try:r.download_dir(rproc,processed)
+        except Exception:pass
+        r.cleanup(marker)
+        if not output.exists():raise BackendError('Hunyuan3D-2mv 未生成 GLB')
+    visual_root=processed/'visual-candidates';report_path=visual_root/'visual-conditioning-report.json';report=json.loads(report_path.read_text(encoding='utf-8')) if report_path.exists() else {};candidates={role:{name:str(visual_root/role/f'{name}.png') for name in ('original','contour','rgb_depth','depth-cue-experimental')} for role in ('front','side','back')}
     selected_images={role:report.get('views',{}).get(role,{}).get('selected',str(processed/f'condition-{"left" if role=="side" else role}.png')) for role in ('front','side','back')}
     return {'backend':'hunyuan3d-2mv','modelVersion':'tencent/Hunyuan3D-2mv','steps':steps,'resolution':resolution,'seed':seed,'views':['front','side','back'],'viewWeights':weights,'processedImages':selected_images,'visualConditioning':report,'visualConditioningReport':str(report_path),'visualCandidates':candidates}
 
 def generate_sf3d(image:Path,output:Path,texture_resolution:int,log,cancelled):
     staging=output.parent/'sf3d-output';staging.mkdir(parents=True,exist_ok=True)
-    command=[str(SF3D_PY),'run.py',str(image),'--output-dir',str(staging),'--texture-resolution',str(texture_resolution),'--remesh_option','none','--target_vertex_count','-1']
-    log(f'Stable Fast 3D 启动：texture={texture_resolution}')
-    run_process(command,SF3D_REPO,log,cancelled,timeout=1200)
+    if MODE!='remote' or not REMOTE_HOST:
+        command=[str(SF3D_PY),'run.py',str(image),'--output-dir',str(staging),'--texture-resolution',str(texture_resolution),'--remesh_option','none','--target_vertex_count','-1']
+        log(f'Stable Fast 3D 启动：texture={texture_resolution}')
+        run_process(command,SF3D_REPO,log,cancelled,timeout=1200)
+    else:
+        rc=_rc();r=remote();marker=_marker();stag=r.stage(marker);r.prepare(marker,[image])
+        rimg=f'{stag}\\{image.name}';rout_dir=f'{stag}\\sf3d-output'
+        command=[rc['sf3d_py'],'run.py',rimg,'--output-dir',rout_dir,'--texture-resolution',str(texture_resolution),'--remesh_option','none','--target_vertex_count','-1']
+        log(f'Stable Fast 3D 远程启动（{r.host}）：texture={texture_resolution}')
+        r.run(command,log,cancelled,timeout=1500,cwd_remote=rc['sf3d_repo'],marker=stag)
+        r.download_dir(stag,staging);r.cleanup(marker)
     candidates=sorted(staging.rglob('mesh.glb'),key=lambda p:p.stat().st_mtime,reverse=True)
     if not candidates:raise BackendError('SF3D 未生成 mesh.glb')
     output.write_bytes(candidates[0].read_bytes())
@@ -99,9 +293,17 @@ def generate_sf3d(image:Path,output:Path,texture_resolution:int,log,cancelled):
 
 def generate_triposr(image:Path,output:Path,log,cancelled):
     staging=output.parent/'triposr-output';staging.mkdir(parents=True,exist_ok=True)
-    command=[str(TRIPOSR_PY),'run.py',str(image),'--output-dir',str(staging),'--model-save-format','glb']
-    log('TripoSR 启动')
-    run_process(command,TRIPOSR_REPO,log,cancelled,timeout=1200)
+    if MODE!='remote' or not REMOTE_HOST:
+        command=[str(TRIPOSR_PY),'run.py',str(image),'--output-dir',str(staging),'--model-save-format','glb']
+        log('TripoSR 启动')
+        run_process(command,TRIPOSR_REPO,log,cancelled,timeout=1200)
+    else:
+        rc=_rc();r=remote();marker=_marker();stag=r.stage(marker);r.prepare(marker,[image])
+        rimg=f'{stag}\\{image.name}';rout_dir=f'{stag}\\triposr-output'
+        command=[rc['triposr_py'],'run.py',rimg,'--output-dir',rout_dir,'--model-save-format','glb']
+        log(f'TripoSR 远程启动（{r.host}）')
+        r.run(command,log,cancelled,timeout=1500,cwd_remote=rc['triposr_repo'],marker=stag)
+        r.download_dir(stag,staging);r.cleanup(marker)
     candidates=sorted(staging.rglob('*.glb'),key=lambda p:p.stat().st_mtime,reverse=True)
     if not candidates:raise BackendError('TripoSR 未生成 GLB')
     output.write_bytes(candidates[0].read_bytes())
@@ -109,33 +311,70 @@ def generate_triposr(image:Path,output:Path,log,cancelled):
 
 def render_blender(source:Path,output_dir:Path,web_glb:Path,log,cancelled,quality:str='standard',texture_resolution:int=0,references:dict[str,Path]|None=None,style_preset:dict|None=None):
     preset=style_preset or {};style_id=str(preset.get('id','realistic'));depth_scale=max(.35,min(1.0,float(preset.get('depthScale',1.0))))
-    command=[str(BLENDER),'--background','--factory-startup','--python',str(BLENDER_RENDERER),'--','--input',str(source),'--output-dir',str(output_dir),'--web-glb',str(web_glb),'--quality',quality,'--texture-resolution',str(texture_resolution),'--style',style_id,'--depth-scale',str(depth_scale)]
-    for role,path in (references or {}).items():
-        if role in ('front','side','back') and path.exists():command.extend([f'--{role}',str(path)])
-    log(f'Blender 5.2 后台四视图渲染启动：style={style_id}, depthScale={depth_scale:.2f}')
-    run_process(command,ROOT,log,cancelled,timeout=900)
+    if MODE!='remote' or not REMOTE_HOST:
+        command=[str(BLENDER),'--background','--factory-startup','--python',str(BLENDER_RENDERER),'--','--input',str(source),'--output-dir',str(output_dir),'--web-glb',str(web_glb),'--quality',quality,'--texture-resolution',str(texture_resolution),'--style',style_id,'--depth-scale',str(depth_scale)]
+        for role,path in (references or {}).items():
+            if role in ('front','side','back') and path.exists():command.extend([f'--{role}',str(path)])
+        log(f'Blender 5.2 后台四视图渲染启动：style={style_id}, depthScale={depth_scale:.2f}')
+        run_process(command,ROOT,log,cancelled,timeout=900)
+    else:
+        rc=_rc();r=remote();marker=_marker();stag=r.stage(marker)
+        uploads=[source]+[p for role,p in (references or {}).items() if role in ('front','side','back') and p.exists()]
+        r.prepare(marker,uploads)
+        rsrc=f'{stag}\\{source.name}';renders=f'{stag}\\renders';web_remote=f'{stag}\\web.glb'
+        command=[rc['blender'],'--background','--factory-startup','--python',rc['renderer'],'--','--input',rsrc,'--output-dir',renders,'--web-glb',web_remote,'--quality',quality,'--texture-resolution',str(texture_resolution),'--style',style_id,'--depth-scale',str(depth_scale)]
+        for role,path in (references or {}).items():
+            if role in ('front','side','back') and path.exists():command.extend([f'--{role}',f'{stag}\\{path.name}'])
+        log(f'Blender 5.2 远程四视图渲染启动（{r.host}）：style={style_id}, depthScale={depth_scale:.2f}')
+        r.run(command,log,cancelled,timeout=1200,marker=stag)
+        r.download_dir(renders,output_dir)
+        r.download_file(web_remote,web_glb)
+        r.cleanup(marker)
+        _flatten(output_dir/'renders')
     expected={v:output_dir/f'{v}.png' for v in ('front','left-three-quarter','side','back')}
     missing=[v for v,p in expected.items() if not p.exists()]
     if missing or not web_glb.exists():raise BackendError(f'Blender 产物不完整：{missing}')
     return expected
 
 def refine_blender(source:Path,output_dir:Path,config_path:Path,log,cancelled,reference_image:Path|None=None):
-    command=[str(BLENDER),'--background','--factory-startup','--python',str(BLENDER_REFINER),'--','--input',str(source),'--output-dir',str(output_dir),'--config',str(config_path)]
-    if reference_image:command.extend(['--reference-image',str(reference_image)])
-    log('启动真实 Blender 后台自动精修')
-    run_process(command,ROOT,log,cancelled,timeout=1800)
+    if MODE!='remote' or not REMOTE_HOST:
+        command=[str(BLENDER),'--background','--factory-startup','--python',str(BLENDER_REFINER),'--','--input',str(source),'--output-dir',str(output_dir),'--config',str(config_path)]
+        if reference_image:command.extend(['--reference-image',str(reference_image)])
+        log('启动真实 Blender 后台自动精修')
+        run_process(command,ROOT,log,cancelled,timeout=1800)
+    else:
+        rc=_rc();r=remote();marker=_marker();stag=r.stage(marker)
+        inputs=[source,config_path]+([reference_image] if reference_image else [])
+        r.prepare(marker,inputs)
+        rsrc=f'{stag}\\{source.name}';rcfg=f'{stag}\\{config_path.name}';rout_dir=f'{stag}\\out'
+        command=[rc['blender'],'--background','--factory-startup','--python',rc['refiner'],'--','--input',rsrc,'--output-dir',rout_dir,'--config',rcfg]
+        if reference_image:command.extend(['--reference-image',f'{stag}\\{reference_image.name}'])
+        log(f'启动远程 Blender 后台自动精修（{r.host}）')
+        r.run(command,log,cancelled,timeout=2100,marker=stag)
+        r.download_dir(rout_dir,output_dir)
+        r.cleanup(marker)
+        _flatten(output_dir/'out')
     report=output_dir/'quality-report.json'
     if not report.exists():raise BackendError('Blender 未生成质量报告')
-    import json
     result=json.loads(report.read_text(encoding='utf-8'))
     if not (output_dir/'refined.glb').exists():raise BackendError('Blender 未生成 refined.glb')
     return result
 
 def export_stl_blender(source:Path,output:Path,scope:str,unit:str,apply_modifiers:bool,log,target_height_mm:float|None=None):
-    command=[str(BLENDER),'--background','--factory-startup','--python',str(BLENDER_STL_EXPORTER),'--','--input',str(source),'--output',str(output),'--scope',scope,'--unit',unit]
-    if apply_modifiers:command.append('--apply-modifiers')
-    if target_height_mm is not None:command.extend(['--target-height-mm',str(target_height_mm)])
-    log(f'Blender STL 导出启动：scope={scope}, unit={unit}, applyModifiers={apply_modifiers}, targetHeightMm={target_height_mm}')
-    run_process(command,ROOT,log,lambda:False,timeout=900)
+    if MODE!='remote' or not REMOTE_HOST:
+        command=[str(BLENDER),'--background','--factory-startup','--python',str(BLENDER_STL_EXPORTER),'--','--input',str(source),'--output',str(output),'--scope',scope,'--unit',unit]
+        if apply_modifiers:command.append('--apply-modifiers')
+        if target_height_mm is not None:command.extend(['--target-height-mm',str(target_height_mm)])
+        log(f'Blender STL 导出启动：scope={scope}, unit={unit}, applyModifiers={apply_modifiers}, targetHeightMm={target_height_mm}')
+        run_process(command,ROOT,log,lambda:False,timeout=900)
+    else:
+        rc=_rc();r=remote();marker=_marker();stag=r.stage(marker);r.prepare(marker,[source])
+        rsrc=f'{stag}\\{source.name}';rout=f'{stag}\\{output.name}'
+        command=[rc['blender'],'--background','--factory-startup','--python',rc['stl_exporter'],'--','--input',rsrc,'--output',rout,'--scope',scope,'--unit',unit]
+        if apply_modifiers:command.append('--apply-modifiers')
+        if target_height_mm is not None:command.extend(['--target-height-mm',str(target_height_mm)])
+        log(f'Blender STL 远程导出启动（{r.host}）：scope={scope}, unit={unit}')
+        r.run(command,log,lambda:False,timeout=1200,marker=stag)
+        r.download_file(rout,output);r.cleanup(marker)
     if not output.exists() or not output.stat().st_size:raise BackendError('Blender 未生成 STL 文件')
     return output
