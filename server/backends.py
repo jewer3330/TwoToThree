@@ -105,19 +105,48 @@ class Remote:
         script=f'[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; & {args}'
         return subprocess.run(self.base+self._ps(script),capture_output=True,text=True,errors='replace',timeout=300)
     def upload(self,local:Path,remote_abs:str):
-        self._retry(lambda:subprocess.run(['scp','-q','-i',str(self.key),'-o','BatchMode=yes','-o','StrictHostKeyChecking=accept-new',str(local),f'{self.user}@{self.host}:{remote_abs.replace(chr(92),"/")}'],check=True,timeout=900))
+        self._retry(lambda:subprocess.run(self._scp_cmd()+[str(local),f'{self.user}@{self.host}:{remote_abs.replace(chr(92),"/")}'],check=True,timeout=300))
     def download_dir(self,remote_dir:str,local_dir:Path):
+        import tarfile
+        remote_dir=remote_dir.replace('/','\\')
+        parent=remote_dir.rsplit('\\',1)[0];name=remote_dir.rsplit('\\',1)[1]
         local_dir.mkdir(parents=True,exist_ok=True)
-        self._retry(lambda:subprocess.run(['scp','-q','-r','-i',str(self.key),'-o','BatchMode=yes','-o','StrictHostKeyChecking=accept-new',f'{self.user}@{self.host}:{remote_dir.replace(chr(92),"/")}',str(local_dir)],check=True,timeout=1200))
+        tmp=local_dir/f'{name}.tgz'
+        try:
+            self.cmd(['powershell','-NoProfile','-Command',f"tar -czf '{remote_dir}.tgz' -C '{parent}' '{name}'"])
+            self._retry(lambda:subprocess.run(self._scp_cmd()+[f'{self.user}@{self.host}:{remote_dir.replace(chr(92),"/")}.tgz',str(tmp)],check=True,timeout=600))
+            with tarfile.open(tmp,'r:gz') as t:t.extractall(str(local_dir))
+            # tar 解出的目录名可能与期望不同（如 renders -> local/renders），展平一层
+            child=local_dir/name
+            if child.is_dir() and child!=local_dir:
+                for item in list(child.iterdir()):shutil.move(str(item),str(local_dir))
+                shutil.rmtree(child,ignore_errors=True)
+        finally:
+            tmp.unlink(missing_ok=True)
     def download_file(self,remote_file:str,local_file:Path):
         local_file.parent.mkdir(parents=True,exist_ok=True)
-        self._retry(lambda:subprocess.run(['scp','-q','-i',str(self.key),'-o','BatchMode=yes','-o','StrictHostKeyChecking=accept-new',f'{self.user}@{self.host}:{remote_file.replace(chr(92),"/")}',str(local_file)],check=True,timeout=1200))
-    def _retry(self,fn,attempts=3):
+        self._retry(lambda:subprocess.run(self._scp_cmd()+[f'{self.user}@{self.host}:{remote_file.replace(chr(92),"/")}',str(local_file)],check=True,timeout=300))
+    def download_compressed(self,remote_file:str,local_file:Path):
+        """远端 tar.gz 压缩后回传，本地解压（tailscale relay 带宽低，GLB 压缩率 ~65%）。"""
+        import tarfile
+        remote_file=remote_file.replace('/','\\')
+        remote_dir=remote_file.rsplit('\\',1)[0];remote_name=remote_file.rsplit('\\',1)[1]
+        tmp=local_file.with_suffix(local_file.suffix+'.tgz')
+        try:
+            self.cmd(['powershell','-NoProfile','-Command',f"tar -czf '{remote_file}.tgz' -C '{remote_dir}' '{remote_name}'"])
+            self._retry(lambda:subprocess.run(self._scp_cmd()+[f'{self.user}@{self.host}:{remote_file.replace(chr(92),"/")}.tgz',str(tmp)],check=True,timeout=600))
+            with tarfile.open(tmp,'r:gz') as t:t.extract(local_file.name,str(local_file.parent))
+            if not local_file.exists():raise BackendError('压缩包解压未生成目标文件')
+        finally:
+            tmp.unlink(missing_ok=True)
+    def _scp_cmd(self,extra:list[str]|None=None)->list[str]:
+        return ['scp','-q',*(extra or []),'-i',str(self.key),'-o','BatchMode=yes','-o','StrictHostKeyChecking=accept-new','-o','ServerAliveInterval=15','-o','ServerAliveCountMax=4']
+    def _retry(self,fn,attempts=5):
         last=None
         for i in range(attempts):
             try:return fn()
             except subprocess.CalledProcessError as exc:
-                last=exc;time.sleep(8*(i+1))
+                last=exc;time.sleep(5*(i+1))
         raise last
     def cleanup(self,marker:str):
         try:self.cmd(['powershell','-NoProfile','-Command',f'Remove-Item -Recurse -Force {self.stage(marker)} -ErrorAction SilentlyContinue'])
@@ -266,7 +295,7 @@ def generate_hunyuan(image:Path,output:Path,seed:int,quality:str,log,cancelled):
     command=[rc['python'],rc['runner'],'--image',rimg,'--model',rc['model'],'--output',rout,'--processed-image-output',rproc,'--steps',str(steps),'--resolution',str(resolution),'--seed',str(seed)]
     log(f'Hunyuan3D 2.1 远程启动（{r.host}）：steps={steps}, octree={resolution}, seed={seed}')
     r.run(command,log,cancelled,timeout=3000,marker=stag)
-    r.download_file(rout,output)
+    r.download_compressed(rout,output)
     try:r.download_file(rproc,processed)
     except Exception:pass
     r.cleanup(marker)
@@ -365,7 +394,7 @@ def render_blender(source:Path,output_dir:Path,web_glb:Path,log,cancelled,qualit
         log(f'Blender 5.2 远程四视图渲染启动（{r.host}）：style={style_id}, depthScale={depth_scale:.2f}')
         r.run(command,log,cancelled,timeout=1200,marker=stag)
         r.download_dir(renders,output_dir)
-        r.download_file(web_remote,web_glb)
+        r.download_compressed(web_remote,web_glb)
         r.cleanup(marker)
         _flatten(output_dir/'renders')
     expected={v:output_dir/f'{v}.png' for v in ('front','left-three-quarter','side','back')}
