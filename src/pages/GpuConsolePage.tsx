@@ -1,5 +1,5 @@
 import {useCallback, useEffect, useState} from 'react';
-import {Activity, Cpu, Gauge, HardDrive, Pause, Play, Plus, RefreshCw, Server, Trash2, X} from 'lucide-react';
+import {Activity, Cpu, Gauge, HardDrive, Pause, Play, Plus, RefreshCw, Server, Trash2, Wifi, X} from 'lucide-react';
 import {api} from '../api';
 import type {GpuHost,GpuQueueView,GpuOverview} from '../types';
 import {PageHeader} from '../App';
@@ -16,6 +16,12 @@ function MemBar({used,total}:{used?:number;total?:number}){
   return <div className="gpu-bar"><span className="gpu-bar-fill" style={{width:`${pct}%`}}/></div>;
 }
 
+function LatencyBadge({ms}:{ms?:number}){
+  if(ms==null)return null;
+  const cls=ms<60?'low':ms<200?'mid':'high';
+  return <span className={`lat-badge ${cls}`} title="SSH 往返延迟"><Wifi size={11}/>{ms}ms</span>;
+}
+
 function HostCard({host,onAction}:{host:GpuHost;onAction:(t:'probe'|'toggle'|'delete',h:GpuHost)=>void}){
   const s=host.status||{};
   const online=!!s.online;
@@ -25,6 +31,7 @@ function HostCard({host,onAction}:{host:GpuHost;onAction:(t:'probe'|'toggle'|'de
       <span className={`status-light ${online?'ok':''}`}/>
       <b>{host.name}</b>
       <span className="gpu-host-ip">{host.host}</span>
+      <LatencyBadge ms={s.latencyMs}/>
       <div className="gpu-host-actions">
         <button title="重新探测" onClick={()=>onAction('probe',host)}><RefreshCw size={14}/></button>
         <button title={host.enabled?'禁用':'启用'} onClick={()=>onAction('toggle',host)}>{host.enabled?<Pause size={14}/>:<Play size={14}/>}</button>
@@ -32,7 +39,7 @@ function HostCard({host,onAction}:{host:GpuHost;onAction:(t:'probe'|'toggle'|'de
       </div>
     </div>
     <div className="gpu-host-meta">
-      {online?<><Cpu size={14}/> <b>{s.gpu||'未知 GPU'}</b></>:<span className="muted">离线</span>}
+      {online?<><Cpu size={15}/> <b className="gpu-name">{s.gpu||'未知 GPU'}</b></>:<span className="muted">离线</span>}
     </div>
     {online&&s.memTotal&&<>
       <div className="gpu-host-stat"><Gauge size={14}/> 显存 <span>{s.memUsed} / {s.memTotal} MB</span> <b>{memUsedPct}%</b></div>
@@ -92,15 +99,15 @@ export default function GpuConsolePage(){
     </label>);
 
   return <div className="page gpu-console">
-    <PageHeader eyebrow="GPU 集群" title="算力控制面板" description="GPU 主机状态、任务队列与调度。新增机器只需在下方注册一条配置。" action={
+    <PageHeader eyebrow="GPU 集群" title="算力控制面板" description="GPU 主机状态、任务队列与调度。新增机器只需注册一条配置；调度自动优先低延迟主机。" action={
       <button className="button" onClick={()=>setAdding(!adding)} disabled={busy}>{adding?<X size={16}/>:<Plus size={16}/>}{adding?'取消':'注册主机'}</button>}/>
 
     <div className="gpu-stats">
-      <div className="gpu-stat"><Server size={18}/><b>{overview?.hostCount||0}</b><span>主机</span></div>
-      <div className="gpu-stat ok"><Cpu size={18}/><b>{overview?.online||0}</b><span>在线</span></div>
-      <div className="gpu-stat"><Activity size={18}/><b>{overview?.gpuMemUsed||0} / {overview?.gpuMemTotal||0}</b><span>显存 MB</span></div>
-      <div className="gpu-stat"><Gauge size={18}/><b>{overview?.runningJobs||0}</b><span>运行中</span></div>
-      <div className="gpu-stat"><Activity size={18}/><b>{queue?.counts.queued||0}</b><span>排队</span></div>
+      <div className="gpu-stat"><Server size={20}/><b>{overview?.hostCount||0}</b><span>主机</span></div>
+      <div className="gpu-stat ok"><Cpu size={20}/><b>{overview?.online||0}</b><span>在线</span></div>
+      <div className="gpu-stat"><Gauge size={20}/><b>{Math.round((overview?.gpuMemUsed||0)/1024)} / {Math.round((overview?.gpuMemTotal||0)/1024)}</b><span>显存 GB</span></div>
+      <div className="gpu-stat"><Activity size={20}/><b>{overview?.runningJobs||0}</b><span>运行中</span></div>
+      <div className="gpu-stat"><Activity size={20}/><b>{queue?.counts.queued||0}</b><span>排队</span></div>
     </div>
 
     {adding&&<div className="gpu-add-form">

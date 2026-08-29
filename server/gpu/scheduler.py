@@ -33,8 +33,12 @@ def _pick_host(job:dict):
     requested=[config.get('primaryBackend','hunyuan3d'),*config.get('fallbackBackends',['sf3d','triposr'])]
     with db() as con:
         multi=con.execute('SELECT COUNT(*) c FROM assets WHERE project_id=? AND role IN (\'side\',\'back\') AND active=1',(job['project_id'],)).fetchone()['c']
+    # 按延迟升序排序（低延迟优先，直连优于 relay）
+    candidates=sorted(hosts.list_hosts(),key=lambda h:(
+        h.get('status',{}).get('latencyMs') if h.get('status',{}).get('latencyMs') is not None else 10**6,
+        h.get('name','')))
     for backend in dict.fromkeys(requested):
-        for h in hosts.list_hosts():
+        for h in candidates:
             if not h.get('enabled'):continue
             s=h.get('status',{})
             if not s.get('online'):continue

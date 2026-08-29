@@ -38,6 +38,7 @@ export interface GpuHost {
     memTotal?: number;
     memUsed?: number;
     diskFree?: number;
+    latencyMs?: number;
     caps?: Record<string, boolean>;
     runningJobs?: number;
     lastProbeAt?: string;

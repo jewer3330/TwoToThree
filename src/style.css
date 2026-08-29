@@ -2247,14 +2247,15 @@ main {
 }
 
 /* ===== GPU 控制台 ===== */
-.gpu-console .gpu-stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;margin:16px 0}
-.gpu-stat{display:flex;flex-direction:column;gap:2px;padding:14px;border-radius:12px;background:var(--surface,#151a23);border:1px solid var(--border,#232a37)}
+.gpu-console .gpu-stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:14px;margin:18px 0}
+.gpu-stat{display:flex;flex-direction:column;gap:4px;padding:18px 16px;border-radius:14px;background:var(--surface,#151a23);border:1px solid var(--border,#232a37)}
 .gpu-stat svg{opacity:.7}
-.gpu-stat b{font-size:20px}
-.gpu-stat span{font-size:12px;color:var(--muted,#7d8590)}
+.gpu-stat b{font-size:26px}
+.gpu-stat span{font-size:13px;color:var(--muted,#7d8590)}
 .gpu-stat.ok b{color:#34d399}
-.gpu-hosts-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:14px;margin-bottom:24px}
-.gpu-host{border-radius:14px;padding:14px;background:var(--surface,#151a23);border:1px solid var(--border,#232a37);display:flex;flex-direction:column;gap:8px}
+.gpu-hosts-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(360px,1fr));gap:18px;margin-bottom:28px}
+.gpu-host{border-radius:16px;padding:18px;background:var(--surface,#151a23);border:1px solid var(--border,#232a37);display:flex;flex-direction:column;gap:10px;box-shadow:0 4px 20px #0003}
+.gpu-host-head b{font-size:16px}
 .gpu-host.offline{opacity:.6}
 .gpu-host.disabled{border-style:dashed}
 .gpu-host-head{display:flex;align-items:center;gap:8px}
@@ -2266,15 +2267,16 @@ main {
 .gpu-host-actions button.danger:hover{border-color:#f87171;color:#f87171}
 .status-light{width:10px;height:10px;border-radius:50%;background:#f87171}
 .status-light.ok{background:#34d399;box-shadow:0 0 8px #34d39988}
-.gpu-host-meta{display:flex;align-items:center;gap:6px;font-size:13px}
-.gpu-host-stat{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted,#7d8590)}
+.gpu-host-meta{display:flex;align-items:center;gap:8px;font-size:14px;margin-top:2px}
+.gpu-host-meta .gpu-name{font-size:15px}
+.gpu-host-stat{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--muted,#7d8590)}
 .gpu-host-stat span{flex:1}
-.gpu-bar{height:6px;border-radius:4px;background:#0d1117;overflow:hidden}
+.gpu-bar{height:8px;border-radius:4px;background:#0d1117;overflow:hidden}
 .gpu-bar-fill{display:block;height:100%;background:linear-gradient(90deg,#22d3ee,#34d399);transition:width .4s}
 .gpu-bar-fill.none{width:0}
 .gpu-host-caps{display:flex;flex-wrap:wrap;gap:4px}
-.cap-badge{font-size:11px;padding:2px 8px;border-radius:10px;background:#0ea5e922;color:#7dd3fc;border:1px solid #0ea5e944}
-.gpu-host-foot{display:flex;justify-content:space-between;font-size:12px;color:var(--muted,#7d8590)}
+.cap-badge{font-size:12px;padding:3px 10px;border-radius:10px;background:#0ea5e922;color:#7dd3fc;border:1px solid #0ea5e944}
+.gpu-host-foot{display:flex;justify-content:space-between;font-size:13px;color:var(--muted,#7d8590)}
 .gpu-host-err{font-size:11px;color:#f87171;background:#f8717111;border-radius:8px;padding:6px;word-break:break-all}
 .gpu-add-form{background:var(--surface,#151a23);border:1px dashed var(--border,#232a37);border-radius:14px;padding:16px;margin-bottom:24px}
 .gpu-add-form h3{margin:0 0 12px;font-size:15px}
@@ -2362,3 +2364,18 @@ main {
 .wf-part-colors button.sel{border-color:#fff;box-shadow:0 0 6px #fff8}
 .wf-footer{margin-top:20px;display:flex;justify-content:flex-end}
 .wf-actions{display:flex;gap:8px}
+
+/* ===== 打印发送 ===== */
+.wf-send{margin-top:22px;border-top:1px solid var(--border,#232a37);padding-top:16px}
+.wf-send h4{margin:0 0 12px;font-size:14px}
+.wf-send-row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.wf-send-row .printer-select{background:#0d1117;border:1px solid var(--border,#232a37);border-radius:8px;padding:8px 10px;color:#fff;font-size:13px}
+.wf-send-row .start-print{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted,#7d8590)}
+.wf-send-result{background:#0d1117;border:1px solid var(--border,#232a37);border-radius:10px;padding:10px;font-size:12px;margin-top:12px;white-space:pre-wrap;color:#34d399}
+.wf-send .note{font-size:12px;margin-top:10px}
+
+/* 延迟徽章 */
+.lat-badge{display:inline-flex;align-items:center;gap:3px;font-size:11px;font-weight:600;padding:2px 8px;border-radius:10px}
+.lat-badge.low{background:#34d39922;color:#34d399;border:1px solid #34d39944}
+.lat-badge.mid{background:#fbbf2422;color:#fbbf24;border:1px solid #fbbf2444}
+.lat-badge.high{background:#f8717122;color:#f87171;border:1px solid #f8717144}

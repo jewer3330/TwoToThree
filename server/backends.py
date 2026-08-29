@@ -264,10 +264,12 @@ def _remote_capabilities(r:Remote|None=None)->dict:
 def probe_host(cfg:dict)->dict:
     """探测一台主机的完整健康状态（GPU/显存/磁盘/能力）。供 GPU 控制面板轮询。"""
     r=remote_from_cfg(cfg)
-    if not r:return {'online':False,'gpu':None,'memTotal':None,'memUsed':None,'diskFree':None,'caps':{},'lastError':'no remote'}
-    result={'online':False,'gpu':None,'memTotal':None,'memUsed':None,'diskFree':None,'caps':{},'lastError':None}
+    if not r:return {'online':False,'gpu':None,'memTotal':None,'memUsed':None,'diskFree':None,'latencyMs':None,'route':None,'caps':{},'lastError':'no remote'}
+    result={'online':False,'gpu':None,'memTotal':None,'memUsed':None,'diskFree':None,'latencyMs':None,'route':None,'caps':{},'lastError':None}
     try:
+        t0=time.monotonic()
         out=r.cmd(['nvidia-smi','--query-gpu=name,memory.total,memory.used','--format=csv,noheader,nounits'])
+        result['latencyMs']=round((time.monotonic()-t0)*1000)
         line=out.stdout.strip().splitlines()[0] if out.stdout.strip() else ''
         if line:
             parts=[p.strip() for p in line.split(',')]
