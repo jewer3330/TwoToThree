@@ -532,7 +532,12 @@ def run_refinement(jid):
         for m in config['modules']:
             cap=REFINEMENT_MODULES[m]['capability'];states[m]='running' if cap in ('automatic','inferred') else 'not_configured'
         with db() as con:con.execute('UPDATE refinement_jobs SET module_states=? WHERE id=?',(dump(states),jid))
-        result=refine_blender(resolve_storage(source['storage_path']),root,config_path,save_log,cancelled,resolve_storage(reference['storage_path']) if reference else None)
+        # 精修也走 GPU 调度：按低延迟选主机 + 故障转移（避免默认 env 主机 relay 慢导致回传超时）
+        from .printpipeline.pipeline import run_on_hosts
+        src_path=resolve_storage(source['storage_path'])
+        ref_path=resolve_storage(reference['storage_path']) if reference else None
+        _,result=run_on_hosts(lambda:refine_blender(src_path,root,config_path,save_log,cancelled,ref_path),
+                              timeout_seconds=900,name='Blender 精修')
         for m in config['modules']:
             cap=REFINEMENT_MODULES[m]['capability'];states[m]='awaiting_review' if cap=='inferred' else 'passed' if cap=='automatic' else 'not_configured'
         gates=result.get('gates',{})

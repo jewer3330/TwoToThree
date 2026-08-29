@@ -150,7 +150,7 @@ class Remote:
         tmp=local_dir/f'{name}.tgz'
         try:
             self.cmd(['powershell','-NoProfile','-Command',f"tar -czf '{remote_dir}.tgz' -C '{parent}' '{name}'"])
-            self._retry(lambda:subprocess.run(self._scp_cmd()+[f'{self.user}@{self.host}:{remote_dir.replace(chr(92),"/")}.tgz',str(tmp)],check=True,timeout=600))
+            self._retry(lambda:subprocess.run(self._scp_cmd()+[f'{self.user}@{self.host}:{remote_dir.replace(chr(92),"/")}.tgz',str(tmp)],check=True,timeout=900))
             with tarfile.open(tmp,'r:gz') as t:t.extractall(str(local_dir))
             # tar 解出的目录名可能与期望不同（如 renders -> local/renders），展平一层
             child=local_dir/name
