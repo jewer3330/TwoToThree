@@ -58,14 +58,21 @@ cd deploy/control-plane
 
 ## 打印流程（分模块 + AMS 多色）
 
-打印工作台（`/print-workflow`）：导入模型 → 分模块 → 上色 → 打印（发送衔接后续）。
+打印工作台（`/print-workflow`）：导入模型 → 分模块 → 上色 → 导出 3MF → 发送打印。
 
 - **① 导入模型**：GLB/STL/OBJ/3MF 拖拽上传
-- **② 分模块**：Blender 在 GPU 节点按连通体自动拆分 → 每部件独立 STL + 预览图 + 尺寸/体积（`pipeline/blender_split_connected.py`）
-- **③ 上色**：每部件分配 AMS 线材色（12 色卡）→ 保存多色分配（后续生成多色 3MF）
-- **④ 打印**：与打印机模块衔接（3MF 上传 + 启动，待实现）
+- **② 分模块**：Blender 在 GPU 节点按连通体自动拆分 → 每部件独立 STL + 预览图 + 尺寸/体积（`pipeline/blender_split_connected.py`，Blender 5.2 API 适配）
+- **③ 上色**：每部件分配 AMS 线材色（12 色卡）→ 保存多色分配
+- **④ 导出 3MF**：主控纯 Python 生成多色 3MF（`server/printpipeline/three_mf.py`，无需 Blender 3MF 插件）
+- **⑤ 发送打印**：FTP（curl，拓竹 990 隐式 TLS）上传到打印机 → 可选 MQTT 启动命令
 
 打印任务持久化在 `data/print_jobs/`，API 前缀 `/api/print/*`。
+
+## 基础设施保障
+
+- **GPU 故障转移**：打印流水线按 GPU-1→GPU-2→GPU-3… 顺序尝试，每台带超时保底，失败自动切换下一台（`run_on_hosts`）；GPU 控制台可随时禁用主机
+- **CDN 大文件传输**：上传到 GPU 节点优先走 CDN（局域网 `192.168.31.210:12080` → 公网 `cdn.lovesun.top`，GPU 直接 curl 拉取），绕开 tailscale relay 慢路径（31MB 模型 0.5s vs 20 分钟）；scp 仅作兜底
+- **探测隔离**：每台 GPU 主机独立探测线程（互不阻塞），单次命令 25s 硬超时
 
 ## 当前运行边界
 
