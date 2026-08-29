@@ -34,9 +34,23 @@ class BackendError(RuntimeError):pass
 class CancelledError(RuntimeError):pass
 
 def remote():
+    """当前线程绑定的主机 Remote；否则退回 env 单机配置。"""
+    bound=getattr(_local,'remote',None)
+    if bound is not None:return bound
     if MODE=='remote' and REMOTE_HOST:
         return Remote(REMOTE_HOST,REMOTE_USER,Path(REMOTE_KEY),REMOTE_ROOT,REMOTE_EXT,REMOTE_WORK)
     return None
+
+_local=threading.local()
+def bind_host(cfg:dict|None):
+    """绑定当前线程执行主机（worker 领取任务时调用）。cfg=None 解除绑定。"""
+    if cfg is None:
+        _local.remote=None;return
+    _local.remote=Remote(cfg['host'],cfg['user'],Path(cfg['key']),cfg['root'],cfg['ext'],cfg['work'])
+
+def remote_from_cfg(cfg:dict)->Remote|None:
+    if not cfg or not cfg.get('host'):return None
+    return Remote(cfg['host'],cfg['user'] or 'd0993',Path(cfg['key']),cfg['root'] or '',cfg['ext'] or '',cfg['work'] or '')
 
 class Remote:
     def __init__(self,host,user,key,root,ext,work):
@@ -140,7 +154,7 @@ def _rc():
 
 def capabilities():
     if MODE=='remote' and REMOTE_HOST:
-        return _remote_capabilities()
+        return _remote_capabilities(remote())
     return {
         'hunyuan3d':HUNYUAN_PY.exists() and HUNYUAN_RUNNER.exists() and HUNYUAN_MODEL.exists(),
         'hunyuan3dMultiview':HUNYUAN_PY.exists() and HUNYUAN_MV_RUNNER.exists() and HUNYUAN_MV_WEIGHTS.exists() and HUNYUAN_MV_WEIGHTS.stat().st_size==HUNYUAN_MV_EXPECTED_BYTES,
@@ -153,10 +167,12 @@ def capabilities():
 
 _caps_cache:dict|None=None
 _caps_at=0.0
-def _remote_capabilities():
+def _remote_capabilities(r:Remote|None=None)->dict:
     global _caps_cache,_caps_at
+    r=r or remote()
+    if not r:return {k:False for k in ('hunyuan3d','hunyuan3dMultiview','sf3d','triposr','blender','blenderRefinement','blenderStlExport')}
     if _caps_cache and time.monotonic()-_caps_at<10:return _caps_cache
-    rc=_rc();r=remote()
+    rc=_rc()
     checks=[('hunyuan3d',rc['python']),('hunyuan3d',rc['model']),('hunyuan3d',rc['runner']),
             ('hunyuan3dMultiview',rc['python']),('hunyuan3dMultiview',rc['mv_runner']),('hunyuan3dMultiview',rc['mv_model']),
             ('sf3d',rc['sf3d_py']),('sf3d',rc['sf3d_repo']),
@@ -179,6 +195,27 @@ def _remote_capabilities():
             caps['hunyuan3dMultiview']=caps['hunyuan3dMultiview'] and o.stdout.strip()==str(HUNYUAN_MV_EXPECTED_BYTES)
         except Exception:pass
     _caps_cache=caps;_caps_at=time.monotonic();return caps
+
+def probe_host(cfg:dict)->dict:
+    """探测一台主机的完整健康状态（GPU/显存/磁盘/能力）。供 GPU 控制面板轮询。"""
+    r=remote_from_cfg(cfg)
+    if not r:return {'online':False,'gpu':None,'memTotal':None,'memUsed':None,'diskFree':None,'caps':{},'lastError':'no remote'}
+    result={'online':False,'gpu':None,'memTotal':None,'memUsed':None,'diskFree':None,'caps':{},'lastError':None}
+    try:
+        out=r.cmd(['nvidia-smi','--query-gpu=name,memory.total,memory.used','--format=csv,noheader,nounits'])
+        line=out.stdout.strip().splitlines()[0] if out.stdout.strip() else ''
+        if line:
+            parts=[p.strip() for p in line.split(',')]
+            if len(parts)>=3:
+                result['gpu']=parts[0];result['memTotal']=int(parts[1]);result['memUsed']=int(parts[2])
+        result['online']=bool(result['gpu'])
+        disk=r.cmd(['powershell','-NoProfile','-Command',f"Get-PSDrive -Name {cfg.get('work','D:')[0]} | Select-Object -ExpandProperty Free"])
+        free=disk.stdout.strip()
+        if free:result['diskFree']=round(float(free)/1073741824,1)
+        result['caps']=_remote_capabilities(r)
+    except Exception as exc:
+        result['lastError']=str(exc)[:200]
+    return result
 
 def remote_gpu()->dict|None:
     if MODE!='remote' or not REMOTE_HOST:return None

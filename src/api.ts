@@ -10,6 +10,9 @@ import type {
   DetailPlan,
   DetailJob,
   StylePreset,
+  GpuHost,
+  GpuQueueView,
+  GpuOverview,
 } from "./types";
 const json = async <T>(r: Response): Promise<T> => {
   if (!r.ok) {
@@ -278,4 +281,16 @@ export const api = {
       .then(json<{id:string;partId:string;status:string;progress:number;message:string;candidateUrl?:string;logs:string[];error?:string}>),
   partJob: (id:string) =>
     fetch(`/api/parts/jobs/${id}`).then(json<{id:string;partId:string;status:string;progress:number;message:string;candidateUrl?:string;logs:string[];error?:string}>),
+  gpuHosts: () => fetch("/api/gpu/hosts").then(json<GpuHost[]>),
+  gpuOverview: () => fetch("/api/gpu/overview").then(json<GpuOverview>),
+  gpuQueue: () => fetch("/api/gpu/queue").then(json<GpuQueueView>),
+  gpuAddHost: (body: unknown) =>
+    fetch("/api/gpu/hosts", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }).then(json<GpuHost>),
+  gpuPatchHost: (id: string, body: unknown) =>
+    fetch(`/api/gpu/hosts/${id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }).then(json<GpuHost>),
+  gpuDeleteHost: (id: string) => fetch(`/api/gpu/hosts/${id}`, { method: "DELETE" }),
+  gpuProbeHost: (id: string) => fetch(`/api/gpu/hosts/${id}/probe`, { method: "POST" }).then(json<Record<string, unknown>>),
+  gpuToggleHost: (id: string) => fetch(`/api/gpu/hosts/${id}/toggle`, { method: "POST" }).then(json<GpuHost>),
+  gpuSetPaused: (paused: boolean) =>
+    fetch("/api/gpu/queue/pause", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ paused }) }).then(json<{paused:boolean}>),
 };

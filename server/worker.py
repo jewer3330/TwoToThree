@@ -160,4 +160,13 @@ def run(job_id:str):
         log(job_id,f'任务失败：{exc}');emit(job_id,'stage.failed',{'error':str(exc)})
 def state_for(stage):return {'intake':'queued','analysis':'generating_geometry','geometry':'generating_geometry','glb_validation':'validating_glb','multi_view_render':'rendering_review','visual_review':'rendering_review','manual_refine':'awaiting_manual_refine','materials':'processing_materials','web_optimization':'optimizing_web'}.get(stage,'queued')
 def launch(job_id):
+    """任务入队：优先交由 gpu.scheduler 派发到在线 GPU 主机；无可用主机时本机线程执行。"""
+    try:
+        from .gpu import scheduler as gpu_scheduler
+        with db() as con:con.execute("UPDATE jobs SET status='queued' WHERE id=?",(job_id,))
+        emit(job_id,'job.status',{'status':'queued'})
+        if gpu_scheduler.any_online_host():
+            emit(job_id,'stage.log',{'message':f'[{now()[11:19]}] 任务已入 GPU 队列，等待调度'})
+            return
+    except Exception:pass
     t=threading.Thread(target=run,args=(job_id,),daemon=True,name=f'studio-{job_id}');_threads[job_id]=t;t.start()

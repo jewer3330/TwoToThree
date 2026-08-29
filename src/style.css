@@ -2245,3 +2245,50 @@ main {
     grid-template-columns: 1fr 1fr;
   }
 }
+
+/* ===== GPU 控制台 ===== */
+.gpu-console .gpu-stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;margin:16px 0}
+.gpu-stat{display:flex;flex-direction:column;gap:2px;padding:14px;border-radius:12px;background:var(--surface,#151a23);border:1px solid var(--border,#232a37)}
+.gpu-stat svg{opacity:.7}
+.gpu-stat b{font-size:20px}
+.gpu-stat span{font-size:12px;color:var(--muted,#7d8590)}
+.gpu-stat.ok b{color:#34d399}
+.gpu-hosts-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:14px;margin-bottom:24px}
+.gpu-host{border-radius:14px;padding:14px;background:var(--surface,#151a23);border:1px solid var(--border,#232a37);display:flex;flex-direction:column;gap:8px}
+.gpu-host.offline{opacity:.6}
+.gpu-host.disabled{border-style:dashed}
+.gpu-host-head{display:flex;align-items:center;gap:8px}
+.gpu-host-head b{flex:1}
+.gpu-host-ip{font-size:12px;color:var(--muted,#7d8590)}
+.gpu-host-actions{display:flex;gap:4px}
+.gpu-host-actions button{background:none;border:1px solid var(--border,#232a37);border-radius:8px;padding:4px;color:var(--muted,#7d8590);cursor:pointer}
+.gpu-host-actions button:hover{color:#fff;border-color:#34d399}
+.gpu-host-actions button.danger:hover{border-color:#f87171;color:#f87171}
+.status-light{width:10px;height:10px;border-radius:50%;background:#f87171}
+.status-light.ok{background:#34d399;box-shadow:0 0 8px #34d39988}
+.gpu-host-meta{display:flex;align-items:center;gap:6px;font-size:13px}
+.gpu-host-stat{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted,#7d8590)}
+.gpu-host-stat span{flex:1}
+.gpu-bar{height:6px;border-radius:4px;background:#0d1117;overflow:hidden}
+.gpu-bar-fill{display:block;height:100%;background:linear-gradient(90deg,#22d3ee,#34d399);transition:width .4s}
+.gpu-bar-fill.none{width:0}
+.gpu-host-caps{display:flex;flex-wrap:wrap;gap:4px}
+.cap-badge{font-size:11px;padding:2px 8px;border-radius:10px;background:#0ea5e922;color:#7dd3fc;border:1px solid #0ea5e944}
+.gpu-host-foot{display:flex;justify-content:space-between;font-size:12px;color:var(--muted,#7d8590)}
+.gpu-host-err{font-size:11px;color:#f87171;background:#f8717111;border-radius:8px;padding:6px;word-break:break-all}
+.gpu-add-form{background:var(--surface,#151a23);border:1px dashed var(--border,#232a37);border-radius:14px;padding:16px;margin-bottom:24px}
+.gpu-add-form h3{margin:0 0 12px;font-size:15px}
+.gpu-form-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px;margin-bottom:14px}
+.gpu-field{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--muted,#7d8590)}
+.gpu-field input{background:#0d1117;border:1px solid var(--border,#232a37);border-radius:8px;padding:8px 10px;color:#fff;font-size:13px}
+.gpu-queue{background:var(--surface,#151a23);border:1px solid var(--border,#232a37);border-radius:14px;padding:16px}
+.gpu-queue-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px}
+.gpu-queue-head h3{margin:0}
+.gpu-queue-cols{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px}
+.gpu-queue-col h4{margin:0 0 8px;font-size:13px;color:var(--muted,#7d8590)}
+.gpu-q-item{display:flex;flex-direction:column;gap:2px;padding:8px 10px;border-radius:10px;background:#0d1117;border:1px solid var(--border,#232a37);margin-bottom:6px;font-size:12px}
+.gpu-q-item span{color:var(--muted,#7d8590)}
+.gpu-q-item i{font-style:normal;color:#7dd3fc;font-size:11px}
+.gpu-q-item small{color:#f87171;font-size:11px}
+.gpu-q-item.failed{border-color:#f8717144}
+.gpu-q-item.completed{border-color:#34d39944}

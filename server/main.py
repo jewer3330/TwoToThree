@@ -12,18 +12,20 @@ from PIL import Image,ImageDraw,UnidentifiedImageError
 from pydantic import BaseModel,Field
 from .core import DATA,ROOT,db,dump,init_db,load,now,project_dir,resolve_storage,rowdict,sha256,slugify,storage_path,uid
 from .worker import STAGES,launch
+from .gpu import routes as gpu_routes
 from .backends import capabilities,refine_blender,generate_hunyuan,generate_hunyuan_multiview,export_stl_blender,remote_gpu,BackendError,CancelledError
 from .detail_provider import generate as generate_detail_candidate,stop_server as stop_detail_server
 from .style_presets import DEFAULT_STYLE, public_style_presets, style_preset
 
 @asynccontextmanager
 async def lifespan(_:FastAPI):
-    init_db();seed_demo();yield
+    init_db();seed_demo();gpu_routes.start_services();yield
 
 app=FastAPI(title='2D→3D Studio API',version='1.0.0',docs_url='/api/docs',openapi_url='/api/openapi.json',lifespan=lifespan)
 mimetypes.add_type('model/gltf-binary','.glb')
 _cors=os.environ.get('CORS_ORIGINS','http://localhost:5173,http://127.0.0.1:5173')
 app.add_middleware(CORSMiddleware,allow_origins=[o.strip() for o in _cors.split(',') if o.strip()],allow_methods=['*'],allow_headers=['*'])
+app.include_router(gpu_routes.router)
 
 class ProjectInput(BaseModel):
     name:str=Field(min_length=1,max_length=60);subjectType:str='character';intendedUse:str='web';quality:str='standard';modelStyle:Literal['realistic','cartoon','chibi']=DEFAULT_STYLE;visualConditioningMode:Literal['auto','original','contour','rgb_depth']='auto';segmentationRequired:bool=False;rigRequired:bool=False;preserveFeatures:str='';notes:str=''
@@ -961,7 +963,9 @@ def seed_demo():
         if not src.exists():return
         pid='prj_0000000000000001';stamp=now();thumb='/public/yoyo-reference.png';con.execute('INSERT INTO projects(id,slug,name,subject_type,intended_use,quality,status,passed_stages,total_stages,actual_backend,thumbnail_url,settings,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)',(pid,'yoyo-demo','YOYO · 星空信使','character','web','high','ready_for_review',9,9,'Hunyuan3D + Blender',thumb,'{}',stamp,stamp));vid='ver_0000000000000001';jid='job_0000000000000001';con.execute('INSERT INTO versions VALUES(?,?,?,?,?,?,?)',(vid,pid,1,'v001 · 参考图投射基线','ready_for_review',dump({'scores':{'轮廓匹配':92,'比例一致性':95,'正面可信度':94,'侧面可信度':79,'背面可信度':72},'stats':{'fileSize':'16.7 MB','maxTexture':'2048 × 2048'},'differences':[{'severity':'minor','message':'背面披风厚度来自推断。'}],'approximations':[{'region':'背面','confidence':.72,'note':'参考证据有限'}]}),stamp));con.execute('INSERT INTO jobs VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',(jid,pid,vid,'completed','{}','hunyuan3d','Hunyuan3D + Blender','2.1',42,'web_optimization',1,stamp,stamp,stamp,None,None,0));con.execute('UPDATE projects SET current_job_id=? WHERE id=?',(jid,pid));con.execute('INSERT INTO artifacts VALUES(?,?,?,?,?,?,?,?,?,?,?)',('art_0000000000000001',jid,vid,'glb','yoyo-front-projection-v1.glb',src.relative_to(ROOT).as_posix(),'model/gltf-binary',src.stat().st_size,sha256(src),dump({'backend':'Hunyuan3D + Blender','baseline':True}),stamp))
 
-init_db()
+with db() as con:
+    _job_cols={r['name'] for r in con.execute('PRAGMA table_info(jobs)')}
+    if 'gpu_host_id' not in _job_cols:con.execute('ALTER TABLE jobs ADD COLUMN gpu_host_id TEXT')
 app.mount('/data',StaticFiles(directory=DATA),name='data')
 app.mount('/public',StaticFiles(directory=ROOT/'public'),name='public')
 

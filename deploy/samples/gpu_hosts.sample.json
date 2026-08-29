@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "hosts": [
+    {
+      "id": "gpu_xxxxxxxxxxxx",
+      "name": "GPU-2 4060",
+      "host": "100.69.5.47",
+      "user": "d0993",
+      "key": "/run/secrets/gpu_key",
+      "root": "D:\\print3d\\TwoToThree",
+      "ext": "D:\\print3d",
+      "work": "D:\\print3d\\work",
+      "labels": ["main"],
+      "maxConcurrentJobs": 1,
+      "enabled": true,
+      "createdAt": "2026-08-29T00:00:00+08:00"
+    },
+    {
+      "id": "gpu_yyyyyyyyyyyy",
+      "name": "GPU-1 3060",
+      "host": "100.64.121.83",
+      "user": "administrator",
+      "key": "/run/secrets/gpu_key",
+      "root": "D:\\print3d\\TwoToThree",
+      "ext": "D:\\print3d",
+      "work": "D:\\print3d\\work",
+      "labels": ["backup"],
+      "maxConcurrentJobs": 1,
+      "enabled": false,
+      "createdAt": "2026-08-29T00:00:00+08:00"
+    }
+  ]
+}

@@ -6,6 +6,7 @@ RUN npm ci
 COPY index.html vite.config.ts tsconfig.json tsconfig.app.json tsconfig.node.json ./
 COPY src ./src
 COPY public ./public
+COPY views ./views
 RUN npm run build
 
 # ---- 运行时（API + SPA 静态托管）----
@@ -18,6 +19,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY server ./server
 COPY pipeline ./pipeline
 COPY public ./public
+COPY studio_paths.py ./
 COPY --from=web /build/dist ./dist
 RUN mkdir -p /app/data /root/.ssh && chmod 700 /root/.ssh
 EXPOSE 8000

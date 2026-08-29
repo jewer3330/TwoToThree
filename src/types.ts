@@ -19,6 +19,55 @@ export type ProjectStatus =
   | "completed_with_notes"
   | "failed"
   | "cancelled";
+export interface GpuHost {
+  id: string;
+  name: string;
+  host: string;
+  user: string;
+  key: string;
+  root: string;
+  ext: string;
+  work: string;
+  labels: string[];
+  maxConcurrentJobs: number;
+  enabled: boolean;
+  createdAt: string;
+  status: {
+    online?: boolean;
+    gpu?: string;
+    memTotal?: number;
+    memUsed?: number;
+    diskFree?: number;
+    caps?: Record<string, boolean>;
+    runningJobs?: number;
+    lastProbeAt?: string;
+    lastError?: string | null;
+  };
+}
+export interface GpuQueueItem {
+  id: string;
+  project_id: string;
+  status: string;
+  created_at: string;
+  current_stage: string | null;
+  hostName: string;
+}
+export interface GpuQueueView {
+  paused: boolean;
+  counts: { queued: number; running: number };
+  queued: GpuQueueItem[];
+  running: GpuQueueItem[];
+  recent: (GpuQueueItem & { completed_at?: string; error_summary?: string | null })[];
+}
+export interface GpuOverview {
+  hostCount: number;
+  online: number;
+  enabled: number;
+  gpuMemTotal: number;
+  gpuMemUsed: number;
+  runningJobs: number;
+  queue: { queued: number; running: number };
+}
 export type ModelStyle = "realistic" | "cartoon" | "chibi";
 export interface StylePreset {
   id: ModelStyle;
