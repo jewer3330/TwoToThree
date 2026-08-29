@@ -1,11 +1,24 @@
 """GPU 主机健康探测线程（独立模块）。
 
-周期扫描所有启用主机，把探测结果写入 hosts._state，供控制面板与调度器读取。
+每台主机一个独立探测线程（互不阻塞），单次探测带硬超时；
+结果写入 hosts._state，供控制面板与调度器读取。
 """
 from __future__ import annotations
 import threading, time
 from ..backends import probe_host
 from . import hosts
+
+class _ProbeWorker(threading.Thread):
+    def __init__(self,h:dict):
+        super().__init__(daemon=True,name=f'gpu-probe-{h["id"][-6:]}')
+        self.h=h
+    def run(self):
+        try:
+            status=probe_host(self.h)
+        except Exception as exc:
+            status={'online':False,'lastError':str(exc)[:200]}
+        status['_tick']=int(time.monotonic())
+        hosts.set_state(self.h['id'],**status)
 
 class ProbeThread(threading.Thread):
     def __init__(self,interval:int=30):
@@ -20,13 +33,8 @@ class ProbeThread(threading.Thread):
     def _tick(self):
         now=int(time.monotonic())
         hosts_list=hosts.list_hosts()
-        # 优先探测：新添加 / 明确请求 / 超时未探
-        due=[h for h in hosts_list if h['id'] in hosts.pending_probes() or not h.get('status',{}).get('lastProbeAt') or (now-int(h.get('status',{}).get('_tick',0)))>=self.interval]
-        for h in due:
+        for h in hosts_list:
             if not h.get('enabled'):continue
-            try:
-                status=probe_host(h)
-            except Exception as exc:
-                status={'online':False,'lastError':str(exc)[:200]}
-            status['_tick']=now
-            hosts.set_state(h['id'],**status)
+            s=h.get('status',{})
+            if h['id'] in hosts.pending_probes() or not s.get('lastProbeAt') or (now-int(s.get('_tick',0)))>=self.interval:
+                _ProbeWorker(h).start()

@@ -1,4 +1,4 @@
-"""打印流程 API 路由（独立模块）：导入模型 → 分模块 → AMS 上色 → (发送打印后续)。"""
+"""打印流程 API 路由（独立模块）：导入模型 → 分模块 → AMS 上色 → 发送打印。"""
 from __future__ import annotations
 import shutil
 from pathlib import Path
@@ -6,6 +6,8 @@ from fastapi import APIRouter,File,HTTPException,UploadFile
 from pydantic import BaseModel,Field
 from . import jobs as jobs_mod
 from . import pipeline as pipe
+from . import send as send_mod
+from ..printer import registry as printer_registry
 
 router=APIRouter(prefix='/api/print',tags=['print'])
 
@@ -17,6 +19,9 @@ class SplitInput(BaseModel):
     maxParts:int=Field(default=12,ge=1,le=64)
 class ColorInput(BaseModel):
     assignments:dict[str,str]
+class SendInput(BaseModel):
+    printerId:str
+    startPrint:bool=False   # 是否在上传后直接发送打印命令（需已切片 3MF）
 
 @router.get('/jobs')
 def list_jobs():return jobs_mod.list_jobs()
@@ -66,7 +71,7 @@ def split_job(job_id:str,body:SplitInput|None=None):
     shutil.rmtree(out_dir,ignore_errors=True)
     max_parts=(body.maxParts if body else None) or j.get('split',{}).get('maxParts',12)
     try:
-        report=pipe.split_model(model,out_dir,max_parts=max_parts)
+        report=pipe.split_model(model,out_dir,max_parts=max_parts,timeout_seconds=600)
     except Exception as exc:
         j['split']['status']='failed';j['split']['error']=str(exc)[:300];jobs_mod.save_job(j)
         raise HTTPException(502,f'拆分失败: {exc}')
@@ -109,3 +114,58 @@ def preview(job_id:str):
         out.append({'index':p['index'],'name':p['name'],'preview':p['preview'],
                     'color':assignments.get(stl) or assignments.get(p['stl'],'#9E9E9E')})
     return {'jobId':job_id,'parts':out,'palette':j.get('color',{}).get('palette',[])}
+
+@router.post('/jobs/{job_id}/export3mf')
+def export_3mf(job_id:str):
+    j=jobs_mod.get_job(job_id)
+    if not j:raise HTTPException(404,'打印任务不存在')
+    if j.get('split',{}).get('status')!='done':raise HTTPException(409,'请先完成分模块')
+    parts_dir=jobs_mod.job_dir(job_id)/'split'/'parts'
+    colors={Path(p['stl']).name:(j.get('color',{}).get('assignments',{}).get(Path(p['stl']).name) or '#9E9E9E') for p in j['split']['parts']}
+    out=jobs_mod.job_dir(job_id)/'multicolor.3mf'
+    try:
+        # 主控本地纯 Python 生成多色 3MF（无需 GPU/Blender，快）
+        stls=[(p,p.name) for p in sorted(parts_dir.glob('*.stl'))]
+        from .three_mf import build_3mf
+        build_3mf(stls,colors,out)
+    except Exception as exc:
+        raise HTTPException(502,f'导出 3MF 失败: {exc}')
+    from ..core import sha256
+    j['color']['preview3mf']=f'print_jobs/{job_id}/multicolor.3mf'
+    j['color']['preview3mfHash']=sha256(out)
+    j['step']='send';jobs_mod.save_job(j)
+    return {'ok':True,'url':f'/data/{j["color"]["preview3mf"]}','size':out.stat().st_size}
+
+@router.post('/jobs/{job_id}/send')
+def send_to_printer(job_id:str,body:SendInput):
+    j=jobs_mod.get_job(job_id)
+    if not j:raise HTTPException(404,'打印任务不存在')
+    if not j.get('color',{}).get('preview3mf'):raise HTTPException(409,'请先导出 3MF')
+    printer=printer_registry.get_printer(body.printerId)
+    if not printer:raise HTTPException(404,'打印机不存在')
+    local=jobs_mod.job_abs_path(j,'color.preview3mf') or (jobs_mod.job_dir(job_id)/'multicolor.3mf')
+    # 1) FTP 上传
+    try:
+        remote_name=send_mod.BambuFTP(printer['ip'],printer['accessCode']).upload(local)
+    except Exception as exc:
+        raise HTTPException(502,f'FTP 上传失败: {exc}')
+    result={'ok':True,'uploaded':remote_name,'size':local.stat().st_size}
+    # 2) 可选 MQTT 启动
+    if body.startPrint and printer.get('serial'):
+        md5=send_mod.file_md5(local)
+        res=send_mod.mqtt_send_print(printer['serial'],printer['ip'],printer['accessCode'],
+                                     j['name'],md5)
+        result['printCommand']=res
+    return result
+
+@router.post('/printers/{printer_id}/print')
+def start_print(printer_id:str,body:dict):
+    """对已上传到打印机的已切片 3MF 直接发送打印命令。body: {file, md5, gcode_param?}"""
+    printer=printer_registry.get_printer(printer_id)
+    if not printer:raise HTTPException(404,'打印机不存在')
+    if not printer.get('serial'):raise HTTPException(409,'打印机缺少序列号')
+    res=send_mod.mqtt_send_print(printer['serial'],printer['ip'],printer['accessCode'],
+                                 body.get('subtaskName','打印任务'),body.get('md5',''),
+                                 body.get('gcodeParam','Metadata/plate_1.gcode'))
+    if not res.get('ok'):raise HTTPException(502,res.get('error','命令发送失败'))
+    return {'ok':True}

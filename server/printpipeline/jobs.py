@@ -59,12 +59,16 @@ def delete_job(job_id:str):
 def model_url(job:dict)->str|None:
     mf=job.get('modelFile')
     if not mf:return None
+    if mf.startswith('print_jobs/'):return f'/data/{mf}'
     rel=Path(mf).relative_to(DATA).as_posix()
     return f'/data/{rel}'
 
 def job_abs_path(job:dict,key:str)->Path|None:
-    """把 job 里相对 data 的路径转绝对。"""
-    v=job.get(key)
+    """把 job 里相对 data 的路径转绝对。支持 'a.b.c' 嵌套 key。"""
+    v=job
+    for part in key.split('.'):
+        if not isinstance(v,dict) or part not in v:return None
+        v=v[part]
     if not v:return None
     return (DATA/v).resolve() if v.startswith('print_jobs/') else Path(v)
 

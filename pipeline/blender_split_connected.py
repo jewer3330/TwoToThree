@@ -14,12 +14,14 @@ import argparse, json, math
 from pathlib import Path
 
 def cli():
+    import sys
+    raw=sys.argv[sys.argv.index('--')+1:] if '--' in sys.argv else []
     p=argparse.ArgumentParser()
     p.add_argument('--input',type=Path,required=True)
     p.add_argument('--output-dir',type=Path,required=True)
     p.add_argument('--max-parts',type=int,default=12)
     p.add_argument('--min-volume',type=float,default=0.001)
-    return p.parse_args()
+    return p.parse_args(raw)
 
 def import_model(path:Path):
     import bpy
@@ -32,20 +34,27 @@ def import_model(path:Path):
     else:raise RuntimeError(f'不支持的格式: {ext}')
 
 def split_loose_parts():
-    """按连通体拆分为多个独立对象，返回每个对象的世界包围盒体积（用于排序/过滤）。"""
+    """按连通体拆分为多个独立对象，返回每个对象的世界包围盒体积（用于排序/过滤）。
+
+    策略：glTF/STL/OBJ 导入通常每个连通体就是一个 MESH 对象，直接按对象收集；
+    只有当整个场景只有一个 MESH 对象（单对象多连通体）时才做 LOOSE 分离。
+    （Blender 5.2 的 LOOSE 分离会把立方体拆成零体积面片，不能无条件使用）
+    """
     import bpy
     scene=bpy.context.scene
-    for obj in list(scene.objects):
-        obj.select_set(True)
-        scene.view_layer.objects.active=obj
-        if obj.type=='MESH':
+    mesh_objs=[o for o in scene.objects if o.type=='MESH']
+    if len(mesh_objs)<=1 and mesh_objs:
+        for obj in mesh_objs:
+            obj.select_set(True)
+            bpy.context.view_layer.objects.active=obj
             bpy.ops.object.mode_set(mode='EDIT')
             bpy.ops.mesh.separate(type='LOOSE')
             bpy.ops.object.mode_set(mode='OBJECT')
-        obj.select_set(False)
+            obj.select_set(False)
     parts=[]
     for obj in list(scene.objects):
         if obj.type!='MESH':continue
+        if not obj.data.vertices:continue
         bbox=[obj.matrix_world @ mathutils_Vector(c) for c in obj.bound_box]
         dims=[max(c[i] for c in bbox)-min(c[i] for c in bbox) for i in range(3)]
         volume=obj.dimensions.x*obj.dimensions.y*obj.dimensions.z
@@ -92,7 +101,9 @@ def main():
         obj=p['object']
         bpy.context.view_layer.objects.active=obj
         obj.select_set(True)
-        bpy.ops.export_mesh.stl(filepath=str(stl))
+        # Blender 5.2: export_mesh.stl 改名 wm.stl_export（与导入一致）
+        if hasattr(bpy.ops.wm,'stl_export'):bpy.ops.wm.stl_export(filepath=str(stl))
+        else:bpy.ops.export_mesh.stl(filepath=str(stl))
         obj.select_set(False)
         try:render_preview(obj,png)
         except Exception:pass

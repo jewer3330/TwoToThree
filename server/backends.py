@@ -56,6 +56,8 @@ class Remote:
     def __init__(self,host,user,key,root,ext,work):
         self.host=host;self.user=user;self.key=key;self.root=root;self.ext=ext;self.work=work
         self.base=['ssh','-i',str(key),'-o','BatchMode=yes','-o','ConnectTimeout=15','-o','StrictHostKeyChecking=accept-new',f'{user}@{host}']
+        # CDN 候选（GPU 节点从主控 CDN 下载，绕开 tailscale relay 慢路径）：局域网→tailscale→公网
+        self.cdn_urls=[u for u in os.environ.get('PRINT3D_CDN_URLS','http://192.168.31.210:12080,https://cdn.lovesun.top').split(',') if u]
     def _q(self,arg):
         if '"' in arg:arg=arg.replace('"','\\"')
         return f'"{arg}"'
@@ -97,15 +99,49 @@ class Remote:
     def stage(self,marker:str):return f'{self.work}\\{marker}'
     def prepare(self,marker:str,locals_:list[Path]):
         stag=self.stage(marker)
-        self.cmd(['powershell','-NoProfile','-Command',f'New-Item -ItemType Directory -Force -Path {stag} | Out-Null'])
+        # 确保远端 staging 目录存在（重试，网络抖动时 EncodedCommand 可能失败）
+        for _ in range(3):
+            try:
+                out=self.cmd(['powershell','-NoProfile','-Command',f'New-Item -ItemType Directory -Force -Path {stag} | Out-Null'])
+                if out.returncode==0:break
+            except Exception:pass
+            time.sleep(3)
         for p in locals_:
-            if p.exists():self.upload(p,f'{stag}\\{p.name}')
-    def cmd(self,command):
+            if p.exists():
+                target=f'{stag}\\{p.name}'
+                for attempt in range(3):
+                    try:
+                        self.upload(p,target);break
+                    except Exception:
+                        if attempt==2:raise
+                        self.cmd(['powershell','-NoProfile','-Command',f'New-Item -ItemType Directory -Force -Path {stag} | Out-Null'])
+                        time.sleep(4)
+    def cmd(self,command,timeout:int=25):
         args=' '.join("'"+a.replace("'","''")+"'" for a in command)
         script=f'[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; & {args}'
-        return subprocess.run(self.base+self._ps(script),capture_output=True,text=True,errors='replace',timeout=300)
+        return subprocess.run(self.base+self._ps(script),capture_output=True,text=True,errors='replace',timeout=timeout)
     def upload(self,local:Path,remote_abs:str):
+        """优先走 CDN：文件在 DATA 下 → 远端 curl 从 CDN 拉（局域网/公网候选，快）。
+        否则 scp 兜底。"""
+        from .core import DATA
+        try:
+            rel=local.resolve().relative_to(DATA.resolve()).as_posix()
+            if self.cdn_urls and rel:
+                target=remote_abs.replace('/','\\')
+                cmd='; '.join(f"curl.exe -fL --connect-timeout 5 -sS -o '{target}' '{u}/print3d/{rel}'" for u in self.cdn_urls)
+                try:
+                    out=self.cmd(['powershell','-NoProfile','-Command',f"{cmd}; if(Test-Path '{target}'){{$true}}else{{exit 1}}"],timeout=90)
+                    if out.returncode==0 and self._remote_exists(target):
+                        return
+                except Exception:pass
+        except Exception:pass
         self._retry(lambda:subprocess.run(self._scp_cmd()+[str(local),f'{self.user}@{self.host}:{remote_abs.replace(chr(92),"/")}'],check=True,timeout=300))
+    def _remote_exists(self,path:str)->bool:
+        try:
+            out=self.cmd(['powershell','-NoProfile','-Command',f"Test-Path '{path.replace(chr(92),'/')}'"],timeout=25)
+            return out.returncode==0 and out.stdout.strip().lower()=='true'
+        except Exception:
+            return True  # 无法确认时不阻断
     def download_dir(self,remote_dir:str,local_dir:Path):
         import tarfile
         remote_dir=remote_dir.replace('/','\\')
