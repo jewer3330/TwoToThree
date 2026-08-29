@@ -47,6 +47,26 @@ cd deploy/control-plane
 
 部署手册：`deploy/README.md`（主控部署、GPU 节点安装、注册、运维速查）。
 
+## 拓竹打印机接入（LAN 模式）
+
+支持 Bambu Lab A1/P1/X1 系列局域网接入，通过 MQTT over TLS (8883) 读取实时状态。
+
+- **开启 LAN 模式**：打印机屏幕 → 设置 → 局域网 → 开启局域网模式，记下访问码
+- **注册**：控制台「打印机」页面（`/printer`）或 API `POST /api/printer/printers`（ip + accessCode）
+- **状态**：每 20s 自动探测——在线/打印状态（空闲/待机预热/打印中/完成/失败/暂停）、喷嘴/热床温度、进度、层数、剩余时间、gcode 名、错误
+- **配置**：`data/printers.json`；接入一台新打印机 = 加一条配置
+
+## 打印流程（分模块 + AMS 多色）
+
+打印工作台（`/print-workflow`）：导入模型 → 分模块 → 上色 → 打印（发送衔接后续）。
+
+- **① 导入模型**：GLB/STL/OBJ/3MF 拖拽上传
+- **② 分模块**：Blender 在 GPU 节点按连通体自动拆分 → 每部件独立 STL + 预览图 + 尺寸/体积（`pipeline/blender_split_connected.py`）
+- **③ 上色**：每部件分配 AMS 线材色（12 色卡）→ 保存多色分配（后续生成多色 3MF）
+- **④ 打印**：与打印机模块衔接（3MF 上传 + 启动，待实现）
+
+打印任务持久化在 `data/print_jobs/`，API 前缀 `/api/print/*`。
+
 ## 当前运行边界
 
 - 示例任务使用仓库内已有、已验证的 Hunyuan/Blender 基线 GLB 和四视图，以便完整演示验收闭环。
@@ -64,10 +84,13 @@ npm run build
 
 ## 目录
 
-- `src/`：React/TypeScript 工作台与 Three.js 视口（含 GPU 控制台 `src/pages/GpuConsolePage.tsx`）
+- `src/`：React/TypeScript 工作台与 Three.js 视口（含 GPU 控制台 `src/pages/GpuConsolePage.tsx`、打印机 `PrinterConsolePage.tsx`、打印工作台 `PrintWorkflowPage.tsx`）
 - `server/`：FastAPI、SQLite、上传验证、SSE、本地 Worker 与远程执行层
 - `server/gpu/`：**独立 GPU 集群模块**（主机注册表/健康探测/队列调度/控制面板 API，前缀 `/api/gpu/*`）
+- `server/printer/`：**拓竹打印机接入模块**（LAN MQTT 客户端/注册表/状态探测，前缀 `/api/printer/*`）
+- `server/printpipeline/`：**打印流程模块**（打印任务/分模块/AMS 上色，前缀 `/api/print/*`）
 - `deploy/`：部署脚本（`gpu-node/setup.ps1` GPU 节点安装、`control-plane/` 主控部署与注册）
+- `pipeline/blender_split_connected.py`：连通体拆分脚本（分模块打印）
 - `%USERPROFILE%\AIData\3d\data\projects\<project-id>\versions\<version-id>\`：隔离的配置、模型、渲染、报告和日志
 - `tests/`：上传安全与端到端任务契约测试
 - `design/`：原始产品与实施规范
