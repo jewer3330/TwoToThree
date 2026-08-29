@@ -62,21 +62,26 @@ def split_loose_parts():
     return parts
 
 def render_preview(obj,path:Path,size:int=256):
-    """对单个部件渲染一张前视图 PNG。"""
+    """对单个部件渲染一张前视图 PNG。用 Workbench 引擎（比 EEVEE 快且稳）。"""
     import bpy
+    from mathutils import Vector
     for o in bpy.context.scene.objects:o.hide_set(o!=obj);o.select_set(o==obj)
     bpy.context.view_layer.objects.active=obj
     bpy.ops.object.select_all(action='DESELECT');obj.select_set(True)
-    # 相机对准
     scene=bpy.context.scene
     if 'Camera' not in scene.objects:
         cam=bpy.data.cameras.new('Cam');cam_obj=bpy.data.objects.new('Camera',cam);scene.collection.objects.link(cam_obj)
     cam_obj=scene.objects['Camera']
-    center=obj.matrix_world @ (obj.bound_box[0]+obj.bound_box[6])/2
+    bb=[Vector(c) for c in obj.bound_box]
+    center=obj.matrix_world @ (bb[0]+bb[6])/2
     dims=obj.dimensions;radius=max(dims)/2*1.6
     cam_obj.location=(center.x+radius,center.y-radius*0.7,center.z+radius*0.5)
     cam_obj.rotation_euler=(math.radians(60),0,math.radians(45))
-    scene.render.engine='BLENDER_EEVEE';scene.render.resolution_x=size;scene.render.resolution_y=size
+    scene.render.engine='BLENDER_WORKBENCH'
+    scene.display.shading.light='STUDIO'
+    scene.display.shading.color_type='MATERIAL'
+    scene.render.resolution_x=size;scene.render.resolution_y=size
+    scene.render.image_settings.file_format='PNG'
     scene.render.filepath=str(path)
     scene.camera=cam_obj
     bpy.ops.render.render(write_still=True)
@@ -106,7 +111,16 @@ def main():
         else:bpy.ops.export_mesh.stl(filepath=str(stl))
         obj.select_set(False)
         try:render_preview(obj,png)
-        except Exception:pass
+        except Exception:
+            # preview 失败时生成纯色占位 PNG，避免前端破图
+            try:
+                import struct,zlib
+                w=h=128;white=b'\xff'*3
+                raw=b''.join(b'\x00'+white*w for _ in range(h))
+                data=zlib.compress(raw)
+                def chunk(t,d):return struct.pack('>I',len(d))+t+d+struct.pack('>I',zlib.crc32(t+d)&0xffffffff)
+                png.write_bytes(b'\x89PNG\r\n\x1a\n'+chunk(b'IHDR',struct.pack('>IIBBBBB',w,h,8,2,0,0,0))+chunk(b'IDAT',data)+chunk(b'IEND',b''))
+            except Exception:pass
         report.append({'index':i,'name':p['name'],'stl':stl.name,'preview':png.name,
                        'dims':[round(v,3) for v in p['dims']],'volume':round(p['volume'],4)})
     (a.output_dir/'split-report.json').write_text(json.dumps({'schemaVersion':1,'partCount':len(report),'parts':report},ensure_ascii=False,indent=2),encoding='utf-8')
