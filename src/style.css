@@ -2329,3 +2329,36 @@ main {
 .printer-field{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--muted,#7d8590)}
 .printer-field input,.printer-field select{background:#0d1117;border:1px solid var(--border,#232a37);border-radius:8px;padding:8px 10px;color:#fff;font-size:13px}
 .printer-hint{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--muted,#7d8590);background:var(--surface,#151a23);border:1px solid var(--border,#232a37);border-radius:12px;padding:10px 14px}
+
+/* ===== 打印工作台 ===== */
+.print-workflow .wf-layout{display:grid;grid-template-columns:240px 1fr;gap:16px;margin-top:16px}
+.wf-side{background:var(--surface,#151a23);border:1px solid var(--border,#232a37);border-radius:14px;padding:12px}
+.wf-side h3{margin:0 0 10px;font-size:13px;color:var(--muted,#7d8590)}
+.wf-job{display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:10px;cursor:pointer;border:1px solid transparent;margin-bottom:4px}
+.wf-job:hover{background:#0d1117}
+.wf-job.active{border-color:#22d3ee44;background:#0d1117}
+.wf-job b{flex:1;font-size:13px}
+.wf-job span{font-size:11px;color:var(--muted,#7d8590)}
+.wf-job .icon-btn{background:none;border:none;color:var(--muted,#7d8590);cursor:pointer}
+.wf-main{background:var(--surface,#151a23);border:1px solid var(--border,#232a37);border-radius:14px;padding:20px;min-height:400px}
+.wf-steps{display:flex;gap:18px;font-size:13px;color:var(--muted,#7d8590);margin-bottom:20px;border-bottom:1px solid var(--border,#232a37);padding-bottom:12px}
+.wf-steps .cur{color:#22d3ee;font-weight:600}
+.wf-steps .done{color:#34d399}
+.wf-drop{border:2px dashed var(--border,#232a37);border-radius:14px;padding:48px;text-align:center;color:var(--muted,#7d8590)}
+.wf-drop.over{border-color:#22d3ee;background:#22d3ee0d}
+.wf-drop .link{color:#22d3ee;cursor:pointer}
+.wf-row{display:flex;align-items:center;gap:12px;margin-bottom:16px}
+.wf-model-info{flex:1}
+.wf-model-info b{display:block;font-size:14px}
+.wf-model-info span{font-size:12px;color:var(--muted,#7d8590);word-break:break-all}
+.wf-error{color:#f87171;background:#f8717111;border-radius:8px;padding:10px;margin-bottom:12px;font-size:12px}
+.wf-parts{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:14px}
+.wf-part{border:2px solid var(--border,#232a37);border-radius:12px;padding:10px;display:flex;flex-direction:column;gap:6px;background:#0d1117}
+.wf-part img{width:100%;aspect-ratio:1;object-fit:contain;background:#000;border-radius:8px}
+.wf-part b{font-size:13px}
+.wf-part span{font-size:11px;color:var(--muted,#7d8590)}
+.wf-part-colors{display:flex;flex-wrap:wrap;gap:5px}
+.wf-part-colors button{width:22px;height:22px;border-radius:6px;border:2px solid transparent;cursor:pointer}
+.wf-part-colors button.sel{border-color:#fff;box-shadow:0 0 6px #fff8}
+.wf-footer{margin-top:20px;display:flex;justify-content:flex-end}
+.wf-actions{display:flex;gap:8px}

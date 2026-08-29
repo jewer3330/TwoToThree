@@ -305,4 +305,10 @@ export const api = {
   printerDelete: (id: string) => fetch(`/api/printer/printers/${id}`, { method: "DELETE" }),
   printerProbe: (id: string) => fetch(`/api/printer/printers/${id}/probe`, { method: "POST" }).then(json<{ok:boolean;status?:PrinterStatus}>),
   printerToggle: (id: string) => fetch(`/api/printer/printers/${id}/toggle`, { method: "POST" }).then(json<Printer>),
+  printJobs: () => fetch("/api/print/jobs").then(json<Record<string, unknown>[]>),
+  printJobCreate: (body: unknown) => fetch("/api/print/jobs", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }).then(json<Record<string, unknown>>),
+  printJobUploadModel: (id: string, file: File) => { const f=new FormData();f.append("file",file);return fetch(`/api/print/jobs/${id}/model`,{method:"POST",body:f}).then(json<Record<string, unknown>>); },
+  printJobSplit: (id: string, body: unknown) => fetch(`/api/print/jobs/${id}/split`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }).then(json<Record<string, unknown>>),
+  printJobColor: (id: string, assignments: Record<string,string>) => fetch(`/api/print/jobs/${id}/color`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ assignments }) }).then(json<Record<string, unknown>>),
+  printJobDelete: (id: string) => fetch(`/api/print/jobs/${id}`, { method: "DELETE" }),
 };
