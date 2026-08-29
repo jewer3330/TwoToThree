@@ -132,7 +132,7 @@ export default function GpuConsolePage(){
           {!(queue?.queued||[]).length&&<p className="muted">暂无排队任务</p>}</div>
         <div className="gpu-queue-col"><h4>运行中 {queue?.counts.running||0}</h4>{(queue?.running||[]).map(j=><div key={j.id} className="gpu-q-item"><b>{j.id.slice(-8)}</b><span>{Q_STATUS[j.status]||j.status}</span>{j.hostName&&<i>{j.hostName}</i>}</div>)}
           {!(queue?.running||[]).length&&<p className="muted">暂无运行任务</p>}</div>
-        <div className="gpu-queue-col"><h4>最近任务</h4>{(queue?.recent||[]).map(j=><div key={j.id} className={`gpu-q-item ${j.status}`}><b>{j.id.slice(-8)}</b><span>{Q_STATUS[j.status]||j.status}</span>{j.hostName&&<i>{j.hostName}</i>}{j.error_summary&&<small>{j.error_summary.slice(0,60)}</small>}</div>)}
+        <div className="gpu-queue-col"><h4>最近任务</h4>{(queue?.recent||[]).map(j=><div key={j.id} className={`gpu-q-item ${j.status}`}><b>{j.id.slice(-8)}</b><span>{Q_STATUS[j.status]||j.status}</span>{j.hostName&&<i>{j.hostName}</i>}<small>{j.completed_at?new Date(j.completed_at).toLocaleString('zh-CN',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}):''}</small>{j.error_summary&&<small title={j.error_summary}>{j.error_summary.slice(0,70)}</small>}</div>)}
           {!(queue?.recent||[]).length&&<p className="muted">暂无记录</p>}</div>
       </div>
     </div>
