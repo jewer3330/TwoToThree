@@ -53,13 +53,17 @@ class BambuClient:
             return {'ok':False,'error':str(exc)[:200]}
 
 def parse_print(data:dict)->dict:
-    """从 report JSON 提取关键状态字段。"""
+    """从 report JSON 提取关键状态字段。A1 空闲时无 stg_curr，按温度推断待机状态。"""
     p=data.get('print',{}) if data else {}
     def num(k,d=0):
         try:return round(float(p.get(k,d)),1)
         except Exception:return d
-    stg=p.get('stg_curr','unknown')            # idle/running/finish/failed/pause
-    stg_map={'idle':'空闲','running':'打印中','finish':'完成','failed':'失败','pause':'暂停','prepare':'准备','unknown':'未知'}
+    stg=p.get('stg_curr') or p.get('gcode_state') or 'idle'
+    # 空闲但喷嘴/热床仍在高温（预热保温）→ 待机；无 stg_curr 且低温 → 冷待机
+    nozzle=num('nozzle_temper')
+    if stg in ('idle',None) and nozzle>=50:
+        stg='standby'
+    stg_map={'idle':'空闲','standby':'待机(预热)','running':'打印中','finish':'完成','failed':'失败','pause':'暂停','prepare':'准备','unknown':'未知'}
     percent=p.get('mc_percent')
     percent=round(float(percent),1) if percent is not None else None
     fan=p.get('fan_gear') or p.get('spd_lvl') or 0
