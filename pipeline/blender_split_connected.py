@@ -37,13 +37,14 @@ def split_loose_parts():
     """按连通体拆分为多个独立对象，返回每个对象的世界包围盒体积（用于排序/过滤）。
 
     策略：glTF/STL/OBJ 导入通常每个连通体就是一个 MESH 对象，直接按对象收集；
-    只有当整个场景只有一个 MESH 对象（单对象多连通体）时才做 LOOSE 分离。
-    （Blender 5.2 的 LOOSE 分离会把立方体拆成零体积面片，不能无条件使用）
+    单对象多连通体时才 LOOSE 分离——但大模型（>150k 面）LOOSE 极慢且常是
+    单件角色，直接视为单部件。小模型才 LOOSE（避免 Blender 5.2 拆零碎面片）。
     """
     import bpy
     scene=bpy.context.scene
     mesh_objs=[o for o in scene.objects if o.type=='MESH']
-    if len(mesh_objs)<=1 and mesh_objs:
+    total_faces=sum(len(o.data.polygons) for o in mesh_objs)
+    if len(mesh_objs)<=1 and mesh_objs and total_faces<=150000:
         for obj in mesh_objs:
             obj.select_set(True)
             bpy.context.view_layer.objects.active=obj

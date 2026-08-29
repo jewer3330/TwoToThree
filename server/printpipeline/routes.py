@@ -116,18 +116,30 @@ def preview(job_id:str):
     return {'jobId':job_id,'parts':out,'palette':j.get('color',{}).get('palette',[])}
 
 @router.post('/jobs/{job_id}/export3mf')
-def export_3mf(job_id:str):
+def export_3mf(job_id:str,body:dict|None=None):
     j=jobs_mod.get_job(job_id)
     if not j:raise HTTPException(404,'打印任务不存在')
     if j.get('split',{}).get('status')!='done':raise HTTPException(409,'请先完成分模块')
     parts_dir=jobs_mod.job_dir(job_id)/'split'/'parts'
     colors={Path(p['stl']).name:(j.get('color',{}).get('assignments',{}).get(Path(p['stl']).name) or '#9E9E9E') for p in j['split']['parts']}
     out=jobs_mod.job_dir(job_id)/'multicolor.3mf'
+    add_base=bool((body or {}).get('addBase',True))
     try:
-        # 主控本地纯 Python 生成多色 3MF（无需 GPU/Blender，快）
         stls=[(p,p.name) for p in sorted(parts_dir.glob('*.stl'))]
+        # 网格修复：生成的 3D 模型底部常开口/非流形，切片会报空层 fatal。
+        # 每个部件经 pymeshlab 补洞 + Blender 布尔加底座（默认），变成封闭可打印 mesh。
+        from .mesh_repair import repair_mesh_remote
+        repaired=[]
+        for stl,name in stls:
+            fixed=jobs_mod.job_dir(job_id)/'split'/'parts'/name
+            try:
+                if add_base and stl.stat().st_size>1000000:
+                    repair_mesh_remote(stl,fixed,add_base=True,base_thickness=3.0,pad=2.0)
+            except Exception as exc:
+                print(f'mesh repair skip {name}: {exc}')
+            repaired.append((fixed,name))
         from .three_mf import build_3mf
-        build_3mf(stls,colors,out)
+        build_3mf(repaired,colors,out)
     except Exception as exc:
         raise HTTPException(502,f'导出 3MF 失败: {exc}')
     from ..core import sha256
