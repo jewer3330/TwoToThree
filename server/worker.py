@@ -3,6 +3,7 @@ import json, math, struct, threading, time
 from pathlib import Path
 from .core import ROOT,db,dump,now,project_dir,resolve_storage,sha256,storage_path,uid
 from .backends import BackendError,CancelledError,capabilities,generate_hunyuan,generate_hunyuan_multiview,generate_sf3d,generate_triposr,render_blender
+from .transfers import TransferError
 
 STAGES=[('intake','素材接收'),('analysis','主体分析'),('geometry','几何生成'),('glb_validation','GLB 检查'),('multi_view_render','Blender 标准化与四视图'),('web_optimization','Web GLB 输出')]
 _threads:dict[str,threading.Thread]={}
@@ -52,6 +53,8 @@ def report(job,stage,status,started,warnings=None,error=None,next_action=None):
 def should_cancel(job_id):
     with db() as con:return bool(con.execute('SELECT cancel_requested FROM jobs WHERE id=?',(job_id,)).fetchone()[0])
 def run(job_id:str):
+    from .backends import bind_job
+    bind_job(job_id)
     try:
         with db() as con:
             job=dict(con.execute('SELECT * FROM jobs WHERE id=?',(job_id,)).fetchone());project=con.execute('SELECT subject_type FROM projects WHERE id=?',(job['project_id'],)).fetchone();con.execute("UPDATE jobs SET status='running',started_at=COALESCE(started_at,?) WHERE id=?",(now(),job_id))
@@ -155,6 +158,16 @@ def run(job_id:str):
     except CancelledError as exc:
         with db() as con:con.execute("UPDATE jobs SET status='cancelled',completed_at=? WHERE id=?",(now(),job_id));con.execute("UPDATE projects SET status='cancelled',updated_at=? WHERE current_job_id=?",(now(),job_id))
         log(job_id,str(exc));emit(job_id,'job.status',{'status':'cancelled'})
+    except TransferError as exc:
+        # P0：传输失败 → transfer_pending（GPU 产物保留，不重跑推理，可 resume 续传）
+        from .transfers import pending_for_job
+        code=getattr(exc,'code',None) or 'TRANSFER_FAILED'
+        with db() as con:
+            con.execute("UPDATE jobs SET status='transfer_pending',error_code=?,error_summary=?,completed_at=? WHERE id=?",(code,str(exc)[:500],now(),job_id))
+            con.execute("UPDATE projects SET status='transfer_pending',updated_at=? WHERE current_job_id=?",(now(),job_id))
+        pending=pending_for_job(job_id)
+        log(job_id,f'传输失败进入 transfer_pending（{code}）：{exc}；GPU 产物保留，可恢复续传（{len(pending)} 项）')
+        emit(job_id,'job.status',{'status':'transfer_pending','errorCode':code,'pendingTransfers':len(pending)})
     except Exception as exc:
         with db() as con:con.execute("UPDATE jobs SET status='failed',error_code='WORKER_ERROR',error_summary=?,completed_at=? WHERE id=?",(str(exc),now(),job_id));con.execute("UPDATE projects SET status='failed',updated_at=? WHERE current_job_id=?",(now(),job_id))
         log(job_id,f'任务失败：{exc}');emit(job_id,'stage.failed',{'error':str(exc)})

@@ -48,6 +48,12 @@ def bind_host(cfg:dict|None):
         _local.remote=None;return
     _local.remote=Remote(cfg['host'],cfg['user'],Path(cfg['key']),cfg['root'],cfg['ext'],cfg['work'])
 
+def bind_job(job_id:str|None):
+    """绑定当前线程的 job_id（用于传输状态持久化）。None 解除。"""
+    _local.job_id=job_id
+def current_job_id()->str:
+    return getattr(_local,'job_id','') or ''
+
 def remote_from_cfg(cfg:dict)->Remote|None:
     if not cfg or not cfg.get('host'):return None
     return Remote(cfg['host'],cfg['user'] or 'd0993',Path(cfg['key']),cfg['root'] or '',cfg['ext'] or '',cfg['work'] or '')
@@ -56,11 +62,6 @@ class Remote:
     def __init__(self,host,user,key,root,ext,work):
         self.host=host;self.user=user;self.key=key;self.root=root;self.ext=ext;self.work=work
         self.base=['ssh','-i',str(key),'-o','BatchMode=yes','-o','ConnectTimeout=15','-o','StrictHostKeyChecking=accept-new',f'{user}@{host}']
-        # CDN 候选（GPU 节点从主控 CDN 下载，绕开 tailscale relay 慢路径）：局域网→tailscale→公网
-        self.cdn_urls=[u for u in os.environ.get('PRINT3D_CDN_URLS','http://192.168.31.210:12080,https://cdn.lovesun.top').split(',') if u]
-        # 回传中转：GPU 压缩后公网 PUT 到 upload 端点，主控从本地 upload 卷读取（绕开 DERP 回传慢）
-        self.upload_url=os.environ.get('PRINT3D_UPLOAD_URL','https://cdn.lovesun.top/upload')
-        self.upload_dir=Path(os.environ.get('PRINT3D_UPLOAD_DIR','/Volumes/ssd/servers/print3d_server/upload'))
     def _q(self,arg):
         if '"' in arg:arg=arg.replace('"','\\"')
         return f'"{arg}"'
@@ -124,74 +125,43 @@ class Remote:
         script=f'[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; & {args}'
         return subprocess.run(self.base+self._ps(script),capture_output=True,text=True,errors='replace',timeout=timeout)
     def upload(self,local:Path,remote_abs:str):
-        """优先走 CDN：文件在 DATA 下 → 远端 curl 从 CDN 拉（局域网/公网候选，快）。
-        否则 scp 兜底。"""
-        from .core import DATA
-        try:
-            rel=local.resolve().relative_to(DATA.resolve()).as_posix()
-            if self.cdn_urls and rel:
-                target=remote_abs.replace('/','\\')
-                cmd='; '.join(f"curl.exe -fL --connect-timeout 5 -sS -o '{target}' '{u}/print3d/{rel}'" for u in self.cdn_urls)
-                try:
-                    out=self.cmd(['powershell','-NoProfile','-Command',f"{cmd}; if(Test-Path '{target}'){{$true}}else{{exit 1}}"],timeout=90)
-                    if out.returncode==0 and self._remote_exists(target):
-                        return
-                except Exception:pass
-        except Exception:pass
+        """scp 上传（P0：不经过任何 CDN/中转）。"""
         self._retry(lambda:subprocess.run(self._scp_cmd()+[str(local),f'{self.user}@{self.host}:{remote_abs.replace(chr(92),"/")}'],check=True,timeout=300))
     def _remote_exists(self,path:str)->bool:
+        """远端存在性检查。无法确认（命令失败/异常/超时）必须抛异常，禁止返回 True。"""
+        from .transfers import TransferError,TRANSFER_FAILED
         try:
             out=self.cmd(['powershell','-NoProfile','-Command',f"Test-Path '{path.replace(chr(92),'/')}'"],timeout=25)
-            return out.returncode==0 and out.stdout.strip().lower()=='true'
-        except Exception:
-            return True  # 无法确认时不阻断
-    def pull_via_upload(self,remote_tgz:str,local_tgz:Path)->bool:
-        """从上传中转卷拉取（GPU 已 PUT 单文件 tgz）。取走即清理。返回是否成功。"""
-        # Windows 路径：反斜杠 split 取 basename（Linux Path.name 不认反斜杠）
-        fname=remote_tgz.replace('\\','/').split('/')[-1]
-        src=self.upload_dir/fname
-        if src.exists() and src.stat().st_size>0:
-            import shutil
-            shutil.copy2(src,local_tgz)
-            src.unlink(missing_ok=True)
-            return True
-        return False
-    def push_via_upload(self,remote_file:str)->bool:
-        """GPU 端压缩后 PUT 到公网 upload 端点（绕开 DERP 回传）。
-
-        实测公网 PUT ~160KB/s（DERP scp ~26KB/s，快 6 倍）；但 Cloudflare 上行
-        偶发 502/卡顿，故短超时（120s），失败立即返回 False → 调用方走 scp 兜底。
-        """
-        remote_file=remote_file.replace('/','\\')
-        remote_dir=remote_file.rsplit('\\',1)[0];remote_name=remote_file.rsplit('\\',1)[1]
-        tgz=f'{remote_file}.tgz'
+        except Exception as exc:
+            raise TransferError(TRANSFER_FAILED,f'远端存在性检查失败（无法确认，禁止乐观通过）: {path}: {exc}')
+        if out.returncode!=0:
+            raise TransferError(TRANSFER_FAILED,f'远端存在性检查命令失败（无法确认）: {path}')
+        return out.stdout.strip().lower()=='true'
+    def download(self,remote_file:str,local_file:Path,expected_size:int|None=None,expected_sha256:str|None=None,kind:str='file'):
+        """统一传输入口：scp 拉取 + 校验（长度/SHA-256/GLB）。失败抛 TransferError。"""
+        from .transfers import TransferError,TRANSFER_FAILED,CHECKSUM_MISMATCH,verify_file
+        local_file.parent.mkdir(parents=True,exist_ok=True)
         try:
-            out=self.cmd(['powershell','-NoProfile','-Command',
-                          f"tar -czf '{tgz}' -C '{remote_dir}' '{remote_name}'; if(Test-Path '{tgz}'){{$true}}else{{exit 1}}"],timeout=120)
-            if out.returncode!=0:return False
-            put=self.cmd(['curl.exe','-s','-X','PUT','-T',tgz,
-                          f'{self.upload_url}/{remote_name}.tgz','-w','%{http_code}'],timeout=120)
-            return put.returncode==0 and put.stdout.strip() in ('201','204')
-        except Exception:
-            return False
+            self._retry(lambda:subprocess.run(self._scp_cmd()+[f'{self.user}@{self.host}:{remote_file.replace(chr(92),"/")}',str(local_file)],check=True,timeout=600))
+        except subprocess.CalledProcessError as exc:
+            raise TransferError(TRANSFER_FAILED,f'传输失败（scp）: {remote_file}: {exc}')
+        try:
+            verify_file(local_file,expected_size,expected_sha256,kind)
+        except TransferError:
+            local_file.unlink(missing_ok=True)
+            raise
     def download_dir(self,remote_dir:str,local_dir:Path):
+        """远端目录压缩后回传并解压（统一走 download 校验）。"""
         import tarfile
+        from .transfers import TransferError,TRANSFER_FAILED
         remote_dir=remote_dir.replace('/','\\')
         parent=remote_dir.rsplit('\\',1)[0];name=remote_dir.rsplit('\\',1)[1]
         local_dir.mkdir(parents=True,exist_ok=True)
         tmp=local_dir/f'{name}.tgz'
         try:
-            # 方案A：公网 PUT 中转（绕开 DERP 回传）
-            if self.push_via_upload(remote_dir) and self.pull_via_upload(f'{remote_dir}.tgz',tmp):
-                with tarfile.open(tmp,'r:gz') as t:t.extractall(str(local_dir))
-                child=local_dir/name
-                if child.is_dir() and child!=local_dir:
-                    for item in list(child.iterdir()):shutil.move(str(item),str(local_dir))
-                    shutil.rmtree(child,ignore_errors=True)
-                return
-            # 方案B：scp 压缩回传（兜底）
-            self.cmd(['powershell','-NoProfile','-Command',f"tar -czf '{remote_dir}.tgz' -C '{parent}' '{name}'"])
-            self._retry(lambda:subprocess.run(self._scp_cmd()+[f'{self.user}@{self.host}:{remote_dir.replace(chr(92),"/")}.tgz',str(tmp)],check=True,timeout=900))
+            out=self.cmd(['powershell','-NoProfile','-Command',f"tar -czf '{remote_dir}.tgz' -C '{parent}' '{name}'; if(Test-Path '{remote_dir}.tgz'){{$true}}else{{exit 1}}"],timeout=120)
+            if out.returncode!=0:raise TransferError(TRANSFER_FAILED,f'远端压缩失败: {remote_dir}')
+            self.download(f'{remote_dir}.tgz',tmp,kind='file')
             with tarfile.open(tmp,'r:gz') as t:t.extractall(str(local_dir))
             child=local_dir/name
             if child.is_dir() and child!=local_dir:
@@ -199,28 +169,22 @@ class Remote:
                 shutil.rmtree(child,ignore_errors=True)
         finally:
             tmp.unlink(missing_ok=True)
-    def download_file(self,remote_file:str,local_file:Path):
-        local_file.parent.mkdir(parents=True,exist_ok=True)
-        self._retry(lambda:subprocess.run(self._scp_cmd()+[f'{self.user}@{self.host}:{remote_file.replace(chr(92),"/")}',str(local_file)],check=True,timeout=300))
-    def download_compressed(self,remote_file:str,local_file:Path):
-        """远端 tar.gz 压缩后回传，本地解压。
-
-        优先走公网 PUT 中转（GPU→upload 端点→主控 upload 卷，绕开 DERP）；
-        失败则 scp 压缩回传兜底。
-        """
+    def download_file(self,remote_file:str,local_file:Path,expected_size:int|None=None,expected_sha256:str|None=None,kind:str='file'):
+        """单文件传输（统一入口）。"""
+        self.download(remote_file,local_file,expected_size,expected_sha256,kind)
+    def download_compressed(self,remote_file:str,local_file:Path,expected_size:int|None=None,expected_sha256:str|None=None,kind:str='glb'):
+        """远端 tar.gz 压缩后回传并解压（统一入口 + 校验）。"""
         import tarfile
         remote_file=remote_file.replace('/','\\')
         remote_dir=remote_file.rsplit('\\',1)[0];remote_name=remote_file.rsplit('\\',1)[1]
         tmp=local_file.with_suffix(local_file.suffix+'.tgz')
         try:
-            if self.push_via_upload(remote_file) and self.pull_via_upload(f'{remote_file}.tgz',tmp):
-                with tarfile.open(tmp,'r:gz') as t:t.extract(local_file.name,str(local_file.parent))
-                if not local_file.exists():raise BackendError('压缩包解压未生成目标文件')
-                return
-            self.cmd(['powershell','-NoProfile','-Command',f"tar -czf '{remote_file}.tgz' -C '{remote_dir}' '{remote_name}'"])
-            self._retry(lambda:subprocess.run(self._scp_cmd()+[f'{self.user}@{self.host}:{remote_file.replace(chr(92),"/")}.tgz',str(tmp)],check=True,timeout=600))
+            out=self.cmd(['powershell','-NoProfile','-Command',f"tar -czf '{remote_file}.tgz' -C '{remote_dir}' '{remote_name}'; if(Test-Path '{remote_file}.tgz'){{$true}}else{{exit 1}}"],timeout=120)
+            if out.returncode!=0:raise TransferError(TRANSFER_FAILED,f'远端压缩失败: {remote_file}')
+            self.download(f'{remote_file}.tgz',tmp,kind='file')
             with tarfile.open(tmp,'r:gz') as t:t.extract(local_file.name,str(local_file.parent))
-            if not local_file.exists():raise BackendError('压缩包解压未生成目标文件')
+            if not local_file.exists():raise TransferError(TRANSFER_FAILED,'压缩包解压未生成目标文件')
+            verify_file(local_file,expected_size,expected_sha256,kind)
         finally:
             tmp.unlink(missing_ok=True)
     def _scp_cmd(self,extra:list[str]|None=None)->list[str]:
@@ -232,8 +196,13 @@ class Remote:
             except subprocess.CalledProcessError as exc:
                 last=exc;time.sleep(5*(i+1))
         raise last
-    def cleanup(self,marker:str):
-        try:self.cmd(['powershell','-NoProfile','-Command',f'Remove-Item -Recurse -Force {self.stage(marker)} -ErrorAction SilentlyContinue'])
+    def cleanup(self,marker:str,committed:bool=False):
+        """清理远端 staging。P0：只有主控确认 artifact_committed 后才真正删除；
+        否则跳过（GPU 产物保留，等待定时清理）。"""
+        if not committed:
+            return
+        try:
+            self.cmd(['powershell','-NoProfile','-Command',f'Remove-Item -Recurse -Force {self.stage(marker)} -ErrorAction SilentlyContinue'])
         except Exception:pass
 
 def _flatten(dir_:Path):
@@ -406,10 +375,14 @@ def generate_hunyuan(image:Path,output:Path,seed:int,quality:str,log,cancelled):
     command=[rc['python'],rc['runner'],'--image',rimg,'--model',rc['model'],'--output',rout,'--processed-image-output',rproc,'--steps',str(steps),'--resolution',str(resolution),'--seed',str(seed)]
     log(f'Hunyuan3D 2.1 远程启动（{r.host}）：steps={steps}, octree={resolution}, seed={seed}')
     r.run(command,log,cancelled,timeout=3000,marker=stag)
-    r.download_compressed(rout,output)
+    from .transfers import record_pending,mark_committed
+    cfg={'host':r.host,'user':r.user,'key':str(r.key),'root':r.root,'ext':r.ext,'work':r.work}
+    tid=record_pending(current_job_id(),r.host,marker,rout,str(output),kind='glb',host_cfg=cfg)
+    r.download_compressed(rout,output,kind='glb')
     try:r.download_file(rproc,processed)
     except Exception:pass
-    r.cleanup(marker)
+    mark_committed(tid)
+    r.cleanup(marker,committed=True)
     if not output.exists():raise BackendError('Hunyuan3D 未生成 GLB')
     return {'backend':'hunyuan3d','modelVersion':'tencent/Hunyuan3D-2.1','steps':steps,'resolution':resolution,'seed':seed,'processedImage':str(processed),'command':[Path(x).name if i<2 else x for i,x in enumerate(command)]}
 
@@ -441,10 +414,14 @@ def generate_hunyuan_multiview(images:dict[str,Path],output:Path,seed:int,qualit
         visual=visual_conditioning or {};mode=str(visual.get('mode','auto')) if visual.get('enabled',True) else 'original';depth_blend=max(0,min(.25,float(visual.get('depthBlend',.15))));command.extend(['--visual-conditioning',mode,'--style',style,'--depth-blend',str(depth_blend)])
         log(f'Hunyuan3D-2mv 远程启动（{r.host}）：views=front,side,back, weights={weights}, steps={steps}, octree={resolution}, seed={seed}')
         r.run(command,log,cancelled,timeout=3000,marker=stag)
-        r.download_file(rout,output)
+        from .transfers import record_pending,mark_committed
+        cfg={'host':r.host,'user':r.user,'key':str(r.key),'root':r.root,'ext':r.ext,'work':r.work}
+        tid=record_pending(current_job_id(),r.host,marker,rout,str(output),kind='glb',host_cfg=cfg)
+        r.download_file(rout,output,kind='glb')
         try:r.download_dir(rproc,processed)
         except Exception:pass
-        r.cleanup(marker)
+        mark_committed(tid)
+        r.cleanup(marker,committed=True)
         if not output.exists():raise BackendError('Hunyuan3D-2mv 未生成 GLB')
     visual_root=processed/'visual-candidates';report_path=visual_root/'visual-conditioning-report.json';report=json.loads(report_path.read_text(encoding='utf-8')) if report_path.exists() else {};candidates={role:{name:str(visual_root/role/f'{name}.png') for name in ('original','contour','rgb_depth','depth-cue-experimental')} for role in ('front','side','back')}
     selected_images={role:report.get('views',{}).get(role,{}).get('selected',str(processed/f'condition-{"left" if role=="side" else role}.png')) for role in ('front','side','back')}
@@ -462,7 +439,12 @@ def generate_sf3d(image:Path,output:Path,texture_resolution:int,log,cancelled):
         command=[rc['sf3d_py'],'run.py',rimg,'--output-dir',rout_dir,'--texture-resolution',str(texture_resolution),'--remesh_option','none','--target_vertex_count','-1']
         log(f'Stable Fast 3D 远程启动（{r.host}）：texture={texture_resolution}')
         r.run(command,log,cancelled,timeout=1500,cwd_remote=rc['sf3d_repo'],marker=stag)
-        r.download_dir(stag,staging);r.cleanup(marker)
+        from .transfers import record_pending,mark_committed
+        cfg={'host':r.host,'user':r.user,'key':str(r.key),'root':r.root,'ext':r.ext,'work':r.work}
+        tid=record_pending(current_job_id(),r.host,marker,rout_dir,str(staging),kind='dir',host_cfg=cfg)
+        r.download_dir(stag,staging)
+        mark_committed(tid)
+        r.cleanup(marker,committed=True)
     candidates=sorted(staging.rglob('mesh.glb'),key=lambda p:p.stat().st_mtime,reverse=True)
     if not candidates:raise BackendError('SF3D 未生成 mesh.glb')
     output.write_bytes(candidates[0].read_bytes())
@@ -480,7 +462,12 @@ def generate_triposr(image:Path,output:Path,log,cancelled):
         command=[rc['triposr_py'],'run.py',rimg,'--output-dir',rout_dir,'--model-save-format','glb']
         log(f'TripoSR 远程启动（{r.host}）')
         r.run(command,log,cancelled,timeout=1500,cwd_remote=rc['triposr_repo'],marker=stag)
-        r.download_dir(stag,staging);r.cleanup(marker)
+        from .transfers import record_pending,mark_committed
+        cfg={'host':r.host,'user':r.user,'key':str(r.key),'root':r.root,'ext':r.ext,'work':r.work}
+        tid=record_pending(current_job_id(),r.host,marker,rout_dir,str(staging),kind='dir',host_cfg=cfg)
+        r.download_dir(stag,staging)
+        mark_committed(tid)
+        r.cleanup(marker,committed=True)
     candidates=sorted(staging.rglob('*.glb'),key=lambda p:p.stat().st_mtime,reverse=True)
     if not candidates:raise BackendError('TripoSR 未生成 GLB')
     output.write_bytes(candidates[0].read_bytes())
@@ -504,9 +491,13 @@ def render_blender(source:Path,output_dir:Path,web_glb:Path,log,cancelled,qualit
             if role in ('front','side','back') and path.exists():command.extend([f'--{role}',f'{stag}\\{path.name}'])
         log(f'Blender 5.2 远程四视图渲染启动（{r.host}）：style={style_id}, depthScale={depth_scale:.2f}')
         r.run(command,log,cancelled,timeout=1200,marker=stag)
+        from .transfers import record_pending,mark_committed
+        cfg={'host':r.host,'user':r.user,'key':str(r.key),'root':r.root,'ext':r.ext,'work':r.work}
+        tid=record_pending(current_job_id(),r.host,marker,web_remote,str(web_glb),kind='glb',host_cfg=cfg)
         r.download_dir(renders,output_dir)
-        r.download_compressed(web_remote,web_glb)
-        r.cleanup(marker)
+        r.download_compressed(web_remote,web_glb,kind='glb')
+        mark_committed(tid)
+        r.cleanup(marker,committed=True)
         _flatten(output_dir/'renders')
     expected={v:output_dir/f'{v}.png' for v in ('front','left-three-quarter','side','back')}
     missing=[v for v,p in expected.items() if not p.exists()]
@@ -528,8 +519,12 @@ def refine_blender(source:Path,output_dir:Path,config_path:Path,log,cancelled,re
         if reference_image:command.extend(['--reference-image',f'{stag}\\{reference_image.name}'])
         log(f'启动远程 Blender 后台自动精修（{r.host}）')
         r.run(command,log,cancelled,timeout=2100,marker=stag)
+        from .transfers import record_pending,mark_committed
+        cfg={'host':r.host,'user':r.user,'key':str(r.key),'root':r.root,'ext':r.ext,'work':r.work}
+        tid=record_pending(current_job_id(),r.host,marker,rout_dir,str(output_dir),kind='dir',host_cfg=cfg)
         r.download_dir(rout_dir,output_dir)
-        r.cleanup(marker)
+        mark_committed(tid)
+        r.cleanup(marker,committed=True)
         _flatten(output_dir/'out')
     report=output_dir/'quality-report.json'
     if not report.exists():raise BackendError('Blender 未生成质量报告')
@@ -552,6 +547,11 @@ def export_stl_blender(source:Path,output:Path,scope:str,unit:str,apply_modifier
         if target_height_mm is not None:command.extend(['--target-height-mm',str(target_height_mm)])
         log(f'Blender STL 远程导出启动（{r.host}）：scope={scope}, unit={unit}')
         r.run(command,log,lambda:False,timeout=1200,marker=stag)
-        r.download_file(rout,output);r.cleanup(marker)
+        from .transfers import record_pending,mark_committed
+        cfg={'host':r.host,'user':r.user,'key':str(r.key),'root':r.root,'ext':r.ext,'work':r.work}
+        tid=record_pending(current_job_id(),r.host,marker,rout,str(output),kind='file',host_cfg=cfg)
+        r.download_file(rout,output)
+        mark_committed(tid)
+        r.cleanup(marker,committed=True)
     if not output.exists() or not output.stat().st_size:raise BackendError('Blender 未生成 STL 文件')
     return output

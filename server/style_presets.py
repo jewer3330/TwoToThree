@@ -1,4 +1,5 @@
 """Shared model-style presets used by project setup and generation jobs."""
+from __future__ import annotations
 
 STYLE_PRESETS = {
     "realistic": {

@@ -17,6 +17,7 @@ export type ProjectStatus =
   | "revision_requested"
   | "completed"
   | "completed_with_notes"
+  | "transfer_pending"
   | "failed"
   | "cancelled";
 export interface GpuHost {

@@ -21,7 +21,18 @@ from .style_presets import DEFAULT_STYLE, public_style_presets, style_preset
 
 @asynccontextmanager
 async def lifespan(_:FastAPI):
-    init_db();seed_demo();gpu_routes.start_services();printer_routes.start_services();yield
+    from . import transfers
+    transfers.init_db()
+    init_db();seed_demo();gpu_routes.start_services();printer_routes.start_services()
+    # P0：GPU 产物保留 48h 定时清理（仅清理主控本地残留与过期 pending 状态）
+    import threading as _th
+    def _cleanup_loop():
+        while True:
+            try:transfers.cleanup_expired()
+            except Exception:pass
+            import time as _t;_t.sleep(3600)
+    _th.Thread(target=_cleanup_loop,daemon=True,name='transfer-cleanup').start()
+    yield
 
 app=FastAPI(title='2D→3D Studio API',version='1.0.0',docs_url='/api/docs',openapi_url='/api/openapi.json',lifespan=lifespan)
 mimetypes.add_type('model/gltf-binary','.glb')
@@ -380,7 +391,29 @@ def cancel(jid:str):
 def retry(jid:str):
     old=job_json(jid)
     with db() as con:r=con.execute('SELECT config_snapshot FROM jobs WHERE id=?',(jid,)).fetchone()
+    # P0：transfer_pending 直接进入 resume（续传不重跑推理）
+    if old['status']=='transfer_pending':
+        return resume_transfer(jid)
     return new_job(old['projectId'],load(r['config_snapshot'],{}),old['attempt']+1)
+
+@app.post('/api/jobs/{jid}/resume')
+def resume_transfer(jid:str):
+    """恢复 pending 传输：只重传产物并校验，不重跑推理；成功则继续任务。"""
+    from .transfers import resume_pending,pending_for_job
+    snapshot=job_json(jid)
+    if snapshot['status']!='transfer_pending':
+        raise HTTPException(409,'任务不在 transfer_pending 状态，无法续传')
+    resumed,failed=resume_pending(jid)
+    if failed:
+        with db() as con:
+            con.execute("UPDATE jobs SET status='transfer_pending',error_code='TRANSFER_FAILED',error_summary=? WHERE id=?",
+                        (f'续传失败 {len(failed)} 项: {failed[0][1][:200]}',jid))
+        raise HTTPException(502,f'续传失败（{len(failed)} 项），GPU 产物仍保留: {failed[0][1][:200]}')
+    # 全部续传成功 → 继续任务执行（跳过已完成 stage）
+    with db() as con:con.execute("UPDATE jobs SET status='queued',error_code=NULL,error_summary=NULL WHERE id=?",(jid,))
+    from .worker import launch
+    launch(jid)
+    return job_json(jid)
 @app.post('/api/jobs/{jid}/confirm-geometry')
 def confirm_geometry(jid:str):
     snapshot=job_json(jid)
@@ -972,6 +1005,9 @@ def seed_demo():
         if not src.exists():return
         pid='prj_0000000000000001';stamp=now();thumb='/public/yoyo-reference.png';con.execute('INSERT INTO projects(id,slug,name,subject_type,intended_use,quality,status,passed_stages,total_stages,actual_backend,thumbnail_url,settings,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)',(pid,'yoyo-demo','YOYO · 星空信使','character','web','high','ready_for_review',9,9,'Hunyuan3D + Blender',thumb,'{}',stamp,stamp));vid='ver_0000000000000001';jid='job_0000000000000001';con.execute('INSERT INTO versions VALUES(?,?,?,?,?,?,?)',(vid,pid,1,'v001 · 参考图投射基线','ready_for_review',dump({'scores':{'轮廓匹配':92,'比例一致性':95,'正面可信度':94,'侧面可信度':79,'背面可信度':72},'stats':{'fileSize':'16.7 MB','maxTexture':'2048 × 2048'},'differences':[{'severity':'minor','message':'背面披风厚度来自推断。'}],'approximations':[{'region':'背面','confidence':.72,'note':'参考证据有限'}]}),stamp));con.execute('INSERT INTO jobs(id,project_id,version_id,status,config_snapshot,requested_backend,actual_backend,model_version,seed,current_stage,attempt,created_at,started_at,completed_at,error_code,error_summary,cancel_requested,gpu_host_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL)',(jid,pid,vid,'completed','{}','hunyuan3d','Hunyuan3D + Blender','2.1',42,'web_optimization',1,stamp,stamp,stamp,None,None,0));con.execute('UPDATE projects SET current_job_id=? WHERE id=?',(jid,pid));con.execute('INSERT INTO artifacts VALUES(?,?,?,?,?,?,?,?,?,?,?)',('art_0000000000000001',jid,vid,'glb','yoyo-front-projection-v1.glb',src.relative_to(ROOT).as_posix(),'model/gltf-binary',src.stat().st_size,sha256(src),dump({'backend':'Hunyuan3D + Blender','baseline':True}),stamp))
 
+init_db()  # 模块级建表（幂等）；lifespan 中再次执行以覆盖测试/多进程
+from . import transfers as _transfers
+_transfers.init_db()
 with db() as con:
     _job_cols={r['name'] for r in con.execute('PRAGMA table_info(jobs)')}
     if 'gpu_host_id' not in _job_cols:con.execute('ALTER TABLE jobs ADD COLUMN gpu_host_id TEXT')
