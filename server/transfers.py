@@ -124,18 +124,24 @@ def commit_transfer(tid:str):
     p=get_transfer(tid)
     if not p:return False
     if p['status']=='committed':return True
+    if p['status']!='verified':
+        return False
+    # 先把主控的 durable 状态提交，再尝试清理远端。这样即使 SQLite
+    # 提交失败，也绝不会先删除唯一的 GPU 端副本。
+    with _lock:
+        con=_connect()
+        try:
+            stamp=time.time()
+            changed=con.execute("UPDATE transfers SET status='committed',committed_at=?,updated_at=? WHERE id=? AND status='verified'",(stamp,stamp,tid)).rowcount
+            con.commit()
+        finally:
+            con.close()
+    if not changed:return False
     try:
         r=_remote_for(p)
         r.cleanup(p['marker'],committed=True)
     except Exception:
-        pass  # 远端清理失败不阻断 commit（产物保留，由保留期清理兜底）
-    with _lock:
-        con=_connect()
-        try:
-            con.execute("UPDATE transfers SET status='committed',committed_at=?,updated_at=? WHERE id=?",(time.time(),time.time(),tid))
-            con.commit()
-        finally:
-            con.close()
+        pass  # 远端清理失败不回滚 durable commit；由保留期清理兜底
     return True
 
 def commit_job_transfers(job_id:str)->int:
@@ -145,8 +151,7 @@ def commit_job_transfers(job_id:str)->int:
     """
     n=0
     for p in pending_for_job(job_id):
-        if p['status'] in ('verified','downloaded'):
-            commit_transfer(p['id']);n+=1
+        if p['status']=='verified' and commit_transfer(p['id']):n+=1
     return n
 
 def resume_pending(job_id:str):

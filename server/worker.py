@@ -111,6 +111,10 @@ def _run_inner(job_id:str):
                         elif backend=='triposr':result=generate_triposr(source_image,out,lambda m:log(job_id,m),lambda:should_cancel(job_id))
                         if result:break
                     except CancelledError:raise
+                    # 计算已经完成、仅产物传输失败时，必须交给外层进入
+                    # transfer_pending。绝不能把它当成模型失败继续跑下一个后端，
+                    # 否则会重复消耗 GPU 并覆盖可恢复的远端产物。
+                    except TransferError:raise
                     except Exception as exc:errors.append(f'{backend}: {exc}');warnings.append(f'{backend}-failed');log(job_id,f'{backend} 失败，准备降级：{exc}')
                 if not result:raise BackendError('所有生成后端失败：'+'; '.join(errors))
                 job['actual_backend']=result['backend'];job['model_version']=result.get('modelVersion')

@@ -130,6 +130,19 @@ def test_record_pending_and_commit(tmp_path):
     assert len(transfers.pending_for_job('job_x'))==0
     assert transfers.get_transfer(tid)['status']=='committed'
 
+def test_commit_refuses_unverified_transfer(tmp_path):
+    """下载/校验未完成时不得提交，更不得取得远端对象去清理。"""
+    tid=transfers.record_pending('job_u','host1','m1',r'D:\w\m1\out.glb',str(tmp_path/'out.glb'))
+    assert transfers.commit_transfer(tid) is False
+    assert transfers.get_transfer(tid)['status']=='pending'
+
+def test_worker_does_not_fallback_after_transfer_error():
+    """传输失败必须逃出模型 fallback 循环，进入 transfer_pending。"""
+    source=Path('server/worker.py').read_text(encoding='utf-8')
+    transfer_guard=source.index('except TransferError:raise')
+    generic_handler=source.index("except Exception as exc:errors.append",transfer_guard)
+    assert transfer_guard < generic_handler
+
 def test_init_db_idempotent_migration(tmp_path,monkeypatch):
     """旧库缺列（host_cfg 等）时 init_db 幂等补列，不破坏数据。"""
     db_path=tmp_path/'old.db'
