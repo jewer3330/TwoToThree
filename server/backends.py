@@ -58,6 +58,9 @@ class Remote:
         self.base=['ssh','-i',str(key),'-o','BatchMode=yes','-o','ConnectTimeout=15','-o','StrictHostKeyChecking=accept-new',f'{user}@{host}']
         # CDN 候选（GPU 节点从主控 CDN 下载，绕开 tailscale relay 慢路径）：局域网→tailscale→公网
         self.cdn_urls=[u for u in os.environ.get('PRINT3D_CDN_URLS','http://192.168.31.210:12080,https://cdn.lovesun.top').split(',') if u]
+        # 回传中转：GPU 压缩后公网 PUT 到 upload 端点，主控从本地 upload 卷读取（绕开 DERP 回传慢）
+        self.upload_url=os.environ.get('PRINT3D_UPLOAD_URL','https://cdn.lovesun.top/upload')
+        self.upload_dir=Path(os.environ.get('PRINT3D_UPLOAD_DIR','/Volumes/ssd/servers/print3d_server/upload'))
     def _q(self,arg):
         if '"' in arg:arg=arg.replace('"','\\"')
         return f'"{arg}"'
@@ -142,6 +145,35 @@ class Remote:
             return out.returncode==0 and out.stdout.strip().lower()=='true'
         except Exception:
             return True  # 无法确认时不阻断
+    def pull_via_upload(self,remote_tgz:str,local_tgz:Path)->bool:
+        """从上传中转卷拉取（GPU 已 PUT 单文件 tgz）。取走即清理。返回是否成功。"""
+        # Windows 路径：反斜杠 split 取 basename（Linux Path.name 不认反斜杠）
+        fname=remote_tgz.replace('\\','/').split('/')[-1]
+        src=self.upload_dir/fname
+        if src.exists() and src.stat().st_size>0:
+            import shutil
+            shutil.copy2(src,local_tgz)
+            src.unlink(missing_ok=True)
+            return True
+        return False
+    def push_via_upload(self,remote_file:str)->bool:
+        """GPU 端压缩后 PUT 到公网 upload 端点（绕开 DERP 回传）。
+
+        实测公网 PUT ~160KB/s（DERP scp ~26KB/s，快 6 倍）；但 Cloudflare 上行
+        偶发 502/卡顿，故短超时（120s），失败立即返回 False → 调用方走 scp 兜底。
+        """
+        remote_file=remote_file.replace('/','\\')
+        remote_dir=remote_file.rsplit('\\',1)[0];remote_name=remote_file.rsplit('\\',1)[1]
+        tgz=f'{remote_file}.tgz'
+        try:
+            out=self.cmd(['powershell','-NoProfile','-Command',
+                          f"tar -czf '{tgz}' -C '{remote_dir}' '{remote_name}'; if(Test-Path '{tgz}'){{$true}}else{{exit 1}}"],timeout=120)
+            if out.returncode!=0:return False
+            put=self.cmd(['curl.exe','-s','-X','PUT','-T',tgz,
+                          f'{self.upload_url}/{remote_name}.tgz','-w','%{http_code}'],timeout=120)
+            return put.returncode==0 and put.stdout.strip() in ('201','204')
+        except Exception:
+            return False
     def download_dir(self,remote_dir:str,local_dir:Path):
         import tarfile
         remote_dir=remote_dir.replace('/','\\')
@@ -149,10 +181,18 @@ class Remote:
         local_dir.mkdir(parents=True,exist_ok=True)
         tmp=local_dir/f'{name}.tgz'
         try:
+            # 方案A：公网 PUT 中转（绕开 DERP 回传）
+            if self.push_via_upload(remote_dir) and self.pull_via_upload(f'{remote_dir}.tgz',tmp):
+                with tarfile.open(tmp,'r:gz') as t:t.extractall(str(local_dir))
+                child=local_dir/name
+                if child.is_dir() and child!=local_dir:
+                    for item in list(child.iterdir()):shutil.move(str(item),str(local_dir))
+                    shutil.rmtree(child,ignore_errors=True)
+                return
+            # 方案B：scp 压缩回传（兜底）
             self.cmd(['powershell','-NoProfile','-Command',f"tar -czf '{remote_dir}.tgz' -C '{parent}' '{name}'"])
             self._retry(lambda:subprocess.run(self._scp_cmd()+[f'{self.user}@{self.host}:{remote_dir.replace(chr(92),"/")}.tgz',str(tmp)],check=True,timeout=900))
             with tarfile.open(tmp,'r:gz') as t:t.extractall(str(local_dir))
-            # tar 解出的目录名可能与期望不同（如 renders -> local/renders），展平一层
             child=local_dir/name
             if child.is_dir() and child!=local_dir:
                 for item in list(child.iterdir()):shutil.move(str(item),str(local_dir))
@@ -163,12 +203,20 @@ class Remote:
         local_file.parent.mkdir(parents=True,exist_ok=True)
         self._retry(lambda:subprocess.run(self._scp_cmd()+[f'{self.user}@{self.host}:{remote_file.replace(chr(92),"/")}',str(local_file)],check=True,timeout=300))
     def download_compressed(self,remote_file:str,local_file:Path):
-        """远端 tar.gz 压缩后回传，本地解压（tailscale relay 带宽低，GLB 压缩率 ~65%）。"""
+        """远端 tar.gz 压缩后回传，本地解压。
+
+        优先走公网 PUT 中转（GPU→upload 端点→主控 upload 卷，绕开 DERP）；
+        失败则 scp 压缩回传兜底。
+        """
         import tarfile
         remote_file=remote_file.replace('/','\\')
         remote_dir=remote_file.rsplit('\\',1)[0];remote_name=remote_file.rsplit('\\',1)[1]
         tmp=local_file.with_suffix(local_file.suffix+'.tgz')
         try:
+            if self.push_via_upload(remote_file) and self.pull_via_upload(f'{remote_file}.tgz',tmp):
+                with tarfile.open(tmp,'r:gz') as t:t.extract(local_file.name,str(local_file.parent))
+                if not local_file.exists():raise BackendError('压缩包解压未生成目标文件')
+                return
             self.cmd(['powershell','-NoProfile','-Command',f"tar -czf '{remote_file}.tgz' -C '{remote_dir}' '{remote_name}'"])
             self._retry(lambda:subprocess.run(self._scp_cmd()+[f'{self.user}@{self.host}:{remote_file.replace(chr(92),"/")}.tgz',str(tmp)],check=True,timeout=600))
             with tarfile.open(tmp,'r:gz') as t:t.extract(local_file.name,str(local_file.parent))
