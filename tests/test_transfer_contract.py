@@ -4,11 +4,14 @@
 - 远端存在性检查无法确认时必须失败（禁止返回 True）。
 - 传输错误分类：TRANSFER_FAILED / CHECKSUM_MISMATCH。
 - 下载校验：长度、SHA-256、GLB 有效性。
-- cleanup 只在 committed 后执行（未 committed 保留 GPU 产物）。
-- 传输状态持久化：pending 记录可恢复（resume 续传）。
+- cleanup 只在 commit（Artifact 注册后）执行；未 commit 保留 GPU 产物。
+- 传输状态持久化：pending/downloaded/verified/committed 生命周期，重启恢复。
+- init_db 幂等迁移：旧库缺列时补列。
+- 目录恢复按 dir 分派（不调用文件 download，不重跑推理）。
+- 无 CDN/Cloudflare upload 静默 fallback。
 - 传输失败不重跑推理（worker 进入 transfer_pending）。
 """
-import json, os, shutil, struct, time
+import json, os, shutil, struct, time, sqlite3
 import pytest
 from pathlib import Path
 from server import transfers
@@ -112,12 +115,69 @@ def test_verify_glb_json_corrupt(tmp_path):
 # ---------- 传输状态持久化 + cleanup committed ----------
 
 def test_record_pending_and_commit(tmp_path):
+    # host_cfg 用本机 fake（commit_transfer 的远端 cleanup 会失败被吞，不影响状态推进）
+    cfg={'host':'127.0.0.1','user':'u','key':str(tmp_path/'k'),'root':'r','ext':'e','work':'w'}
     tid=transfers.record_pending('job_x','host1','m1',r'D:\w\m1\out.glb',str(tmp_path/'out.glb'),kind='glb',
-                                 expected_size=100,expected_sha256='abc')
+                                 expected_size=100,expected_sha256='abc',host_cfg=cfg)
     pend=transfers.pending_for_job('job_x')
     assert len(pend)==1 and pend[0]['status']=='pending'
-    transfers.mark_committed(tid)
+    # commit 前不清理、状态仍 pending（允许远端产物保留）
+    assert pend[0]['status']=='pending'
+    transfers.mark_downloaded(tid)
+    transfers.mark_verified(tid)
+    assert transfers.get_transfer(tid)['status']=='verified'
+    transfers.commit_transfer(tid)
     assert len(transfers.pending_for_job('job_x'))==0
+    assert transfers.get_transfer(tid)['status']=='committed'
+
+def test_init_db_idempotent_migration(tmp_path,monkeypatch):
+    """旧库缺列（host_cfg 等）时 init_db 幂等补列，不破坏数据。"""
+    db_path=tmp_path/'old.db'
+    con=sqlite3.connect(str(db_path))
+    con.execute('''CREATE TABLE transfers(
+        id TEXT PRIMARY KEY, job_id TEXT NOT NULL, host TEXT NOT NULL, marker TEXT NOT NULL,
+        remote_path TEXT NOT NULL, local_path TEXT NOT NULL, kind TEXT NOT NULL DEFAULT 'glb',
+        status TEXT NOT NULL DEFAULT 'pending', created_at REAL NOT NULL, updated_at REAL NOT NULL)''')
+    con.execute("INSERT INTO transfers(id,job_id,host,marker,remote_path,local_path,created_at,updated_at) VALUES('t1','j1','h','m','rp','lp',0,0)")
+    con.commit();con.close()
+    monkeypatch.setattr(transfers,'DB',db_path)
+    transfers.init_db()  # 应补 host_cfg/expected_* 列且不报错
+    cols={r[1] for r in sqlite3.connect(str(db_path)).execute('PRAGMA table_info(transfers)')}
+    assert {'host_cfg','expected_size','expected_sha256','committed_at','error_code'} <= cols
+    # 数据保留
+    row=sqlite3.connect(str(db_path)).execute("SELECT id,status FROM transfers WHERE id='t1'").fetchone()
+    assert row==('t1','pending')
+    # 再次调用幂等
+    transfers.init_db()
+
+def test_no_cdn_or_upload_fallback():
+    """P0：backends 不得存在 CDN/upload 中转引用（禁止静默 fallback）。"""
+    src=Path('server/backends.py').read_text(encoding='utf-8')
+    for banned in ('cdn_urls','upload_url','push_via_upload','pull_via_upload','PRINT3D_CDN','PRINT3D_UPLOAD','cloudflare'):
+        assert banned not in src, f'backends.py 不应包含 {banned}'
+
+def test_resume_dir_uses_download_dir(monkeypatch,tmp_path):
+    """目录恢复按 dir 分派：调用 download_dir，不调文件 download，不重跑推理。"""
+    import server.backends as b
+    calls={'download_dir':0,'download':0,'download_compressed':0,'download_file':0}
+    def fake_download_dir(self,remote,local):
+        calls['download_dir']+=1
+        (Path(local)).mkdir(parents=True,exist_ok=True)
+        (Path(local)/'f.txt').write_text('x')
+    def fake_download(self,*a,**k):calls['download']+=1
+    def fake_dc(self,*a,**k):calls['download_compressed']+=1
+    def fake_df(self,*a,**k):calls['download_file']+=1
+    monkeypatch.setattr(b.Remote,'download_dir',fake_download_dir)
+    monkeypatch.setattr(b.Remote,'download',fake_download)
+    monkeypatch.setattr(b.Remote,'download_compressed',fake_dc)
+    monkeypatch.setattr(b.Remote,'download_file',fake_df)
+    cfg={'host':'127.0.0.1','user':'u','key':str(tmp_path/'k'),'root':'r','ext':'e','work':'w'}
+    tid=transfers.record_pending('job_d','h','m',r'D:\w\m\out',str(tmp_path/'out'),kind='dir',host_cfg=cfg)
+    resumed,failed=transfers.resume_pending('job_d')
+    assert resumed==1 and failed==0
+    assert calls['download_dir']==1 and calls['download']==0 and calls['download_compressed']==0
+    assert (tmp_path/'out'/'f.txt').exists()
+    assert transfers.get_transfer(tid)['status']=='verified'  # 续传成功进入 verified，未 commit
 
 def test_cleanup_only_after_committed():
     from server.backends import Remote

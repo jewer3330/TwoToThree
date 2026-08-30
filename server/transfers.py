@@ -27,6 +27,15 @@ def _connect():
     con.row_factory=sqlite3.Row
     return con
 
+# 已存在表可能需要补齐的列（旧库无这些列时迁移）
+_MIGRATIONS=[
+    ('host_cfg','TEXT'),
+    ('expected_size','INTEGER'),
+    ('expected_sha256','TEXT'),
+    ('committed_at','REAL'),
+    ('error_code','TEXT'),
+]
+
 def init_db():
     con=_connect()
     try:
@@ -40,13 +49,18 @@ def init_db():
             kind TEXT NOT NULL DEFAULT 'glb',
             expected_size INTEGER,
             expected_sha256 TEXT,
-            status TEXT NOT NULL DEFAULT 'pending',   -- pending|committed|cleaned
+            status TEXT NOT NULL DEFAULT 'pending',   -- pending|downloaded|verified|committed|cleaned
             error_code TEXT,
             created_at REAL NOT NULL,
             committed_at REAL,
             updated_at REAL NOT NULL,
             host_cfg TEXT
         )''')
+        # 幂等迁移：已存在但缺列的旧表逐个补齐（SQLite 无 ADD COLUMN IF NOT EXISTS）
+        cols={r['name'] for r in con.execute('PRAGMA table_info(transfers)')}
+        for name,ddl in _MIGRATIONS:
+            if name not in cols:
+                con.execute(f'ALTER TABLE transfers ADD COLUMN {name} {ddl}')
         con.execute('CREATE INDEX IF NOT EXISTS idx_transfers_job ON transfers(job_id)')
         con.execute('CREATE INDEX IF NOT EXISTS idx_transfers_status ON transfers(status)')
         con.commit()
@@ -70,7 +84,51 @@ def record_pending(job_id:str,host:str,marker:str,remote_path:str,local_path:str
             con.close()
     return tid
 
-def mark_committed(tid:str):
+def mark_downloaded(tid:str):
+    """下载完成（未校验）。仅当当前为 pending 时推进。"""
+    with _lock:
+        con=_connect()
+        try:
+            con.execute("UPDATE transfers SET status='downloaded',updated_at=? WHERE id=? AND status='pending'",(time.time(),tid))
+            con.commit()
+        finally:
+            con.close()
+
+def mark_verified(tid:str):
+    """校验通过（长度/SHA-256/GLB）。仅当 downloaded/pending 时推进。"""
+    with _lock:
+        con=_connect()
+        try:
+            con.execute("UPDATE transfers SET status='verified',updated_at=? WHERE id=? AND status IN ('pending','downloaded')",(time.time(),tid))
+            con.commit()
+        finally:
+            con.close()
+
+def get_transfer(tid:str)->dict|None:
+    with _lock:
+        con=_connect()
+        try:
+            r=con.execute('SELECT * FROM transfers WHERE id=?',(tid,)).fetchone()
+            return dict(r) if r else None
+        finally:
+            con.close()
+
+def _remote_for(p:dict):
+    from .backends import Remote
+    cfg=json.loads(p['host_cfg']) if p.get('host_cfg') else None
+    if not cfg or not cfg.get('host'):raise ValueError('缺少主机连接快照，无法恢复传输')
+    return Remote(cfg['host'],cfg['user'],Path(cfg['key']),cfg.get('root',''),cfg.get('ext',''),cfg.get('work',''))
+
+def commit_transfer(tid:str):
+    """调用方完成 Artifact 持久化注册后显式 commit：标记 committed 并清理远端产物。"""
+    p=get_transfer(tid)
+    if not p:return False
+    if p['status']=='committed':return True
+    try:
+        r=_remote_for(p)
+        r.cleanup(p['marker'],committed=True)
+    except Exception:
+        pass  # 远端清理失败不阻断 commit（产物保留，由保留期清理兜底）
     with _lock:
         con=_connect()
         try:
@@ -78,69 +136,92 @@ def mark_committed(tid:str):
             con.commit()
         finally:
             con.close()
+    return True
 
-def mark_cleaned(tid:str):
+def commit_job_transfers(job_id:str)->int:
+    """把某 job 所有已 verified（或 downloaded）未 commit 的传输一并 commit。
+
+    供 worker 在产物已注册到 Artifact 表后调用；返回 commit 数量。
+    """
+    n=0
+    for p in pending_for_job(job_id):
+        if p['status'] in ('verified','downloaded'):
+            commit_transfer(p['id']);n+=1
+    return n
+
+def resume_pending(job_id:str):
+    """恢复传输：按 kind 分派正确方法（file/glb/compressed/dir），不重跑推理。
+
+    返回 (resumed, pending_left)：resumed 为成功续传数（进入 verified，等待调用方
+    commit_transfer），pending_left 为仍失败的项数。
+    """
+    from .backends import Remote, BackendError
+    from .transfers import verify_file
+    pending=pending_for_job(job_id)
+    resumed=0;failed=0
+    for p in pending:
+        try:
+            r=_remote_for(p)
+            local=Path(p['local_path'])
+            kind=p['kind']
+            exp_size=p.get('expected_size');exp_sha=p.get('expected_sha256')
+            if kind=='dir':
+                # 目录：压缩后整体回传并解压（download_dir 内部校验归档）
+                r.download_dir(p['remote_path'],local)
+            elif kind=='glb':
+                # GLB 走压缩回传 + GLB 有效性校验
+                r.download_compressed(p['remote_path'],local,expected_size=exp_size,expected_sha256=exp_sha,kind='glb')
+            elif kind=='compressed':
+                r.download_compressed(p['remote_path'],local,expected_size=exp_size,expected_sha256=exp_sha,kind='file')
+            else:  # file
+                r.download_file(p['remote_path'],local,expected_size=exp_size,expected_sha256=exp_sha,kind='file')
+            mark_verified(p['id'])
+            resumed+=1
+        except Exception as exc:
+            failed+=1
+    return resumed,failed
+
+def all_pending():
+    """全局未 commit 的传输。"""
     with _lock:
         con=_connect()
         try:
-            con.execute("UPDATE transfers SET status='cleaned',updated_at=? WHERE id=?",(time.time(),tid))
-            con.commit()
-        finally:
-            con.close()
-
-def pending_for_job(job_id:str):
-    with _lock:
-        con=_connect()
-        try:
-            rows=con.execute("SELECT * FROM transfers WHERE job_id=? AND status='pending' ORDER BY created_at",(job_id,)).fetchall()
+            rows=con.execute("SELECT * FROM transfers WHERE status IN ('pending','downloaded','verified') ORDER BY created_at").fetchall()
             return [dict(r) for r in rows]
         finally:
             con.close()
 
-def resume_pending(job_id:str):
-    """恢复传输：对 job 的 pending 产物重新拉取并校验（不重跑推理）。
-
-    返回 (resumed, failed)：resumed 为成功提交数，failed 为失败列表。
-    每项使用记录时的 host 连接快照 + 期望校验值；成功则标记 committed。
-    """
-    from .backends import Remote, BackendError
-    pending=pending_for_job(job_id)
-    resumed=0;failed=[]
-    for p in pending:
-        try:
-            cfg=json.loads(p['host_cfg']) if p.get('host_cfg') else None
-            if not cfg or not cfg.get('host'):
-                failed.append((p['id'],'缺少主机连接快照，无法恢复传输'));continue
-            r=Remote(cfg['host'],cfg['user'],Path(cfg['key']),cfg.get('root',''),cfg.get('ext',''),cfg.get('work',''))
-            r.download(p['remote_path'],Path(p['local_path']),
-                       expected_size=p['expected_size'],expected_sha256=p['expected_sha256'],kind=p['kind'])
-            mark_committed(p['id'])
-            r.cleanup(p['marker'],committed=True)
-            resumed+=1
-        except Exception as exc:
-            failed.append((p['id'],str(exc)[:200]))
-    return resumed,failed
-
-def all_pending():
+def pending_for_job(job_id:str):
+    """未 commit 的传输（pending/downloaded/verified）——等待续传或 commit。"""
     with _lock:
         con=_connect()
         try:
-            rows=con.execute("SELECT * FROM transfers WHERE status='pending' ORDER BY created_at").fetchall()
+            rows=con.execute("SELECT * FROM transfers WHERE job_id=? AND status IN ('pending','downloaded','verified') ORDER BY created_at",(job_id,)).fetchall()
             return [dict(r) for r in rows]
         finally:
             con.close()
 
 def cleanup_expired(retention_hours:float=RETENTION_HOURS)->int:
-    """清理超过保留期的 pending 记录（GPU 产物已在远端，主控仅清理本地状态与本地残留文件）。"""
+    """清理超过保留期的未 commit 传输：删除远端 GPU 产物 + 本地残留，状态置 cleaned。
+
+    只处理 pending/downloaded/verified（未 commit）；committed 由 commit_transfer 即时清理。
+    """
     cutoff=time.time()-retention_hours*3600
     with _lock:
         con=_connect()
         try:
-            rows=con.execute("SELECT * FROM transfers WHERE status='pending' AND created_at<?",(cutoff,)).fetchall()
+            rows=con.execute("SELECT * FROM transfers WHERE status IN ('pending','downloaded','verified') AND created_at<?",(cutoff,)).fetchall()
             for r in rows:
-                # 清理本地残留临时文件（远端由 GPU 端清理，主控不主动删 GPU 产物）
+                # 删除远端 GPU 产物（用记录时的主机快照）
+                try:
+                    rmt=_remote_for(dict(r));rmt.cleanup(r['marker'],committed=True)
+                except Exception:pass
+                # 清理本地残留
                 local=Path(r['local_path'])
-                if local.exists():local.unlink(missing_ok=True)
+                if local.exists():
+                    if local.is_dir():
+                        import shutil;shutil.rmtree(local,ignore_errors=True)
+                    else:local.unlink(missing_ok=True)
                 con.execute("UPDATE transfers SET status='cleaned',updated_at=? WHERE id=?",(time.time(),r['id']))
             con.commit()
             return len(rows)

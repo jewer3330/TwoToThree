@@ -137,21 +137,65 @@ class Remote:
         if out.returncode!=0:
             raise TransferError(TRANSFER_FAILED,f'远端存在性检查命令失败（无法确认）: {path}')
         return out.stdout.strip().lower()=='true'
-    def download(self,remote_file:str,local_file:Path,expected_size:int|None=None,expected_sha256:str|None=None,kind:str='file'):
-        """统一传输入口：scp 拉取 + 校验（长度/SHA-256/GLB）。失败抛 TransferError。"""
+    def remote_metadata(self,remote_file:str)->tuple[int|None,str|None]:
+        """一次远端 PowerShell 调用取得文件 size + SHA-256。
+
+        返回 (size, sha256)。无法取得（文件缺失/命令失败）抛 TransferError。
+        用于传输前持久化 expected_size/expected_sha256 并在下载后校验。
+        """
+        from .transfers import TransferError,TRANSFER_FAILED
+        remote_file=remote_file.replace('/','\\')
+        script=(f"if(Test-Path '{remote_file}'){{$i=Get-Item '{remote_file}';"
+                f"$h=Get-FileHash '{remote_file}' -Algorithm SHA256;"
+                f"Write-Output ($i.Length.ToString()+'|'+$h.Hash.ToLower())}}else{{Write-Output 'MISSING'}}")
+        try:
+            out=self.cmd(['powershell','-NoProfile','-Command',script],timeout=60)
+        except Exception as exc:
+            raise TransferError(TRANSFER_FAILED,f'远端元数据获取失败: {remote_file}: {exc}')
+        if out.returncode!=0:
+            raise TransferError(TRANSFER_FAILED,f'远端元数据命令失败: {remote_file}')
+        text=out.stdout.strip()
+        if text=='MISSING' or '|' not in text:
+            raise TransferError(TRANSFER_FAILED,f'远端产物缺失或无法取得元数据: {remote_file}')
+        size_s,sha=text.split('|',1)
+        try:return int(size_s),sha.strip()
+        except Exception:
+            raise TransferError(TRANSFER_FAILED,f'远端元数据格式异常: {remote_file}: {text!r}')
+
+    def remote_archive_metadata(self,remote_dir:str)->tuple[str,int|None,str|None]:
+        """对远端目录压缩归档，返回 (tgz_abs_path, size, sha256)。
+
+        目录没有单一文件可校验，故先归档，再对归档文件取 size+sha256 作为校验基准。
+        """
+        from .transfers import TransferError,TRANSFER_FAILED
+        remote_dir=remote_dir.replace('/','\\')
+        parent=remote_dir.rsplit('\\',1)[0];name=remote_dir.rsplit('\\',1)[1]
+        tgz=f'{remote_dir}.tgz'
+        out=self.cmd(['powershell','-NoProfile','-Command',
+                      f"tar -czf '{tgz}' -C '{parent}' '{name}'; if(Test-Path '{tgz}'){{$true}}else{{exit 1}}"],timeout=120)
+        if out.returncode!=0:raise TransferError(TRANSFER_FAILED,f'远端压缩失败: {remote_dir}')
+        size,sha=self.remote_metadata(tgz)
+        return tgz,size,sha
+
+    def download(self,remote_file:str,local_file:Path,expected_size:int|None=None,expected_sha256:str|None=None,kind:str='file',legacy_scp:bool=True):
+        """统一传输入口：scp 拉取 + 校验（长度/SHA-256/GLB）。
+
+        legacy_scp=True 表示当前经 SCP（P0 保留旧路径，明确标记 legacy；不静默走 CDN/DERP
+        中转）。后续 P1/P2 以 IPv6 原生直连替换。
+        """
         from .transfers import TransferError,TRANSFER_FAILED,CHECKSUM_MISMATCH,verify_file
         local_file.parent.mkdir(parents=True,exist_ok=True)
         try:
             self._retry(lambda:subprocess.run(self._scp_cmd()+[f'{self.user}@{self.host}:{remote_file.replace(chr(92),"/")}',str(local_file)],check=True,timeout=600))
         except subprocess.CalledProcessError as exc:
-            raise TransferError(TRANSFER_FAILED,f'传输失败（scp）: {remote_file}: {exc}')
+            raise TransferError(TRANSFER_FAILED,f'传输失败（legacy_scp）: {remote_file}: {exc}')
         try:
             verify_file(local_file,expected_size,expected_sha256,kind)
         except TransferError:
             local_file.unlink(missing_ok=True)
             raise
-    def download_dir(self,remote_dir:str,local_dir:Path):
-        """远端目录压缩后回传并解压（统一走 download 校验）。"""
+    def download_dir(self,remote_dir:str,local_dir:Path,expected_size:int|None=None,expected_sha256:str|None=None):
+        """远端目录压缩后回传并解压；归档取 size+sha256 作为校验基准。"""
         import tarfile
         from .transfers import TransferError,TRANSFER_FAILED
         remote_dir=remote_dir.replace('/','\\')
@@ -159,9 +203,8 @@ class Remote:
         local_dir.mkdir(parents=True,exist_ok=True)
         tmp=local_dir/f'{name}.tgz'
         try:
-            out=self.cmd(['powershell','-NoProfile','-Command',f"tar -czf '{remote_dir}.tgz' -C '{parent}' '{name}'; if(Test-Path '{remote_dir}.tgz'){{$true}}else{{exit 1}}"],timeout=120)
-            if out.returncode!=0:raise TransferError(TRANSFER_FAILED,f'远端压缩失败: {remote_dir}')
-            self.download(f'{remote_dir}.tgz',tmp,kind='file')
+            tgz,size,sha=self.remote_archive_metadata(remote_dir)
+            self.download(tgz,tmp,expected_size=size or expected_size,expected_sha256=sha or expected_sha256,kind='file')
             with tarfile.open(tmp,'r:gz') as t:t.extractall(str(local_dir))
             child=local_dir/name
             if child.is_dir() and child!=local_dir:
@@ -375,16 +418,18 @@ def generate_hunyuan(image:Path,output:Path,seed:int,quality:str,log,cancelled):
     command=[rc['python'],rc['runner'],'--image',rimg,'--model',rc['model'],'--output',rout,'--processed-image-output',rproc,'--steps',str(steps),'--resolution',str(resolution),'--seed',str(seed)]
     log(f'Hunyuan3D 2.1 远程启动（{r.host}）：steps={steps}, octree={resolution}, seed={seed}')
     r.run(command,log,cancelled,timeout=3000,marker=stag)
-    from .transfers import record_pending,mark_committed
+    from .transfers import record_pending,mark_downloaded,mark_verified
     cfg={'host':r.host,'user':r.user,'key':str(r.key),'root':r.root,'ext':r.ext,'work':r.work}
-    tid=record_pending(current_job_id(),r.host,marker,rout,str(output),kind='glb',host_cfg=cfg)
-    r.download_compressed(rout,output,kind='glb')
+    # P0：传输前一次远端调用取得 size+SHA-256，持久化 expected 并在下载后校验
+    size,sha=r.remote_metadata(rout)
+    tid=record_pending(current_job_id(),r.host,marker,rout,str(output),kind='glb',expected_size=size,expected_sha256=sha,host_cfg=cfg)
+    r.download_compressed(rout,output,expected_size=size,expected_sha256=sha,kind='glb')
+    mark_downloaded(tid);mark_verified(tid)
     try:r.download_file(rproc,processed)
     except Exception:pass
-    mark_committed(tid)
-    r.cleanup(marker,committed=True)
+    # 不 commit、不清理远端：等待调用方完成 Artifact 持久化注册后 commit_transfer(tid)
     if not output.exists():raise BackendError('Hunyuan3D 未生成 GLB')
-    return {'backend':'hunyuan3d','modelVersion':'tencent/Hunyuan3D-2.1','steps':steps,'resolution':resolution,'seed':seed,'processedImage':str(processed),'command':[Path(x).name if i<2 else x for i,x in enumerate(command)]}
+    return {'backend':'hunyuan3d','modelVersion':'tencent/Hunyuan3D-2.1','steps':steps,'resolution':resolution,'seed':seed,'processedImage':str(processed),'command':[Path(x).name if i<2 else x for i,x in enumerate(command)],'transferTid':tid}
 
 def generate_hunyuan_multiview(images:dict[str,Path],output:Path,seed:int,quality:str,view_weights:dict[str,float],log,cancelled,visual_conditioning:dict|None=None,style:str='realistic'):
     """Run a real multi-view backend; never concatenate views or silently use front only."""
@@ -414,14 +459,14 @@ def generate_hunyuan_multiview(images:dict[str,Path],output:Path,seed:int,qualit
         visual=visual_conditioning or {};mode=str(visual.get('mode','auto')) if visual.get('enabled',True) else 'original';depth_blend=max(0,min(.25,float(visual.get('depthBlend',.15))));command.extend(['--visual-conditioning',mode,'--style',style,'--depth-blend',str(depth_blend)])
         log(f'Hunyuan3D-2mv 远程启动（{r.host}）：views=front,side,back, weights={weights}, steps={steps}, octree={resolution}, seed={seed}')
         r.run(command,log,cancelled,timeout=3000,marker=stag)
-        from .transfers import record_pending,mark_committed
+        from .transfers import record_pending,mark_downloaded,mark_verified
         cfg={'host':r.host,'user':r.user,'key':str(r.key),'root':r.root,'ext':r.ext,'work':r.work}
-        tid=record_pending(current_job_id(),r.host,marker,rout,str(output),kind='glb',host_cfg=cfg)
-        r.download_file(rout,output,kind='glb')
+        size,sha=r.remote_metadata(rout)
+        tid=record_pending(current_job_id(),r.host,marker,rout,str(output),kind='glb',expected_size=size,expected_sha256=sha,host_cfg=cfg)
+        r.download_file(rout,output,expected_size=size,expected_sha256=sha,kind='glb')
+        mark_downloaded(tid);mark_verified(tid)
         try:r.download_dir(rproc,processed)
         except Exception:pass
-        mark_committed(tid)
-        r.cleanup(marker,committed=True)
         if not output.exists():raise BackendError('Hunyuan3D-2mv 未生成 GLB')
     visual_root=processed/'visual-candidates';report_path=visual_root/'visual-conditioning-report.json';report=json.loads(report_path.read_text(encoding='utf-8')) if report_path.exists() else {};candidates={role:{name:str(visual_root/role/f'{name}.png') for name in ('original','contour','rgb_depth','depth-cue-experimental')} for role in ('front','side','back')}
     selected_images={role:report.get('views',{}).get(role,{}).get('selected',str(processed/f'condition-{"left" if role=="side" else role}.png')) for role in ('front','side','back')}
@@ -439,16 +484,15 @@ def generate_sf3d(image:Path,output:Path,texture_resolution:int,log,cancelled):
         command=[rc['sf3d_py'],'run.py',rimg,'--output-dir',rout_dir,'--texture-resolution',str(texture_resolution),'--remesh_option','none','--target_vertex_count','-1']
         log(f'Stable Fast 3D 远程启动（{r.host}）：texture={texture_resolution}')
         r.run(command,log,cancelled,timeout=1500,cwd_remote=rc['sf3d_repo'],marker=stag)
-        from .transfers import record_pending,mark_committed
+        from .transfers import record_pending,mark_downloaded,mark_verified
         cfg={'host':r.host,'user':r.user,'key':str(r.key),'root':r.root,'ext':r.ext,'work':r.work}
         tid=record_pending(current_job_id(),r.host,marker,rout_dir,str(staging),kind='dir',host_cfg=cfg)
         r.download_dir(stag,staging)
-        mark_committed(tid)
-        r.cleanup(marker,committed=True)
+        mark_downloaded(tid);mark_verified(tid)
     candidates=sorted(staging.rglob('mesh.glb'),key=lambda p:p.stat().st_mtime,reverse=True)
     if not candidates:raise BackendError('SF3D 未生成 mesh.glb')
     output.write_bytes(candidates[0].read_bytes())
-    return {'backend':'sf3d','modelVersion':'stabilityai/stable-fast-3d','textureResolution':texture_resolution}
+    return {'backend':'sf3d','modelVersion':'stabilityai/stable-fast-3d','textureResolution':texture_resolution,'transferTid':tid}
 
 def generate_triposr(image:Path,output:Path,log,cancelled):
     staging=output.parent/'triposr-output';staging.mkdir(parents=True,exist_ok=True)
@@ -462,16 +506,15 @@ def generate_triposr(image:Path,output:Path,log,cancelled):
         command=[rc['triposr_py'],'run.py',rimg,'--output-dir',rout_dir,'--model-save-format','glb']
         log(f'TripoSR 远程启动（{r.host}）')
         r.run(command,log,cancelled,timeout=1500,cwd_remote=rc['triposr_repo'],marker=stag)
-        from .transfers import record_pending,mark_committed
+        from .transfers import record_pending,mark_downloaded,mark_verified
         cfg={'host':r.host,'user':r.user,'key':str(r.key),'root':r.root,'ext':r.ext,'work':r.work}
         tid=record_pending(current_job_id(),r.host,marker,rout_dir,str(staging),kind='dir',host_cfg=cfg)
         r.download_dir(stag,staging)
-        mark_committed(tid)
-        r.cleanup(marker,committed=True)
+        mark_downloaded(tid);mark_verified(tid)
     candidates=sorted(staging.rglob('*.glb'),key=lambda p:p.stat().st_mtime,reverse=True)
     if not candidates:raise BackendError('TripoSR 未生成 GLB')
     output.write_bytes(candidates[0].read_bytes())
-    return {'backend':'triposr','modelVersion':'stabilityai/TripoSR'}
+    return {'backend':'triposr','modelVersion':'stabilityai/TripoSR','transferTid':tid}
 
 def render_blender(source:Path,output_dir:Path,web_glb:Path,log,cancelled,quality:str='standard',texture_resolution:int=0,references:dict[str,Path]|None=None,style_preset:dict|None=None):
     preset=style_preset or {};style_id=str(preset.get('id','realistic'));depth_scale=max(.35,min(1.0,float(preset.get('depthScale',1.0))))
@@ -491,13 +534,15 @@ def render_blender(source:Path,output_dir:Path,web_glb:Path,log,cancelled,qualit
             if role in ('front','side','back') and path.exists():command.extend([f'--{role}',f'{stag}\\{path.name}'])
         log(f'Blender 5.2 远程四视图渲染启动（{r.host}）：style={style_id}, depthScale={depth_scale:.2f}')
         r.run(command,log,cancelled,timeout=1200,marker=stag)
-        from .transfers import record_pending,mark_committed
+        from .transfers import record_pending,mark_downloaded,mark_verified
         cfg={'host':r.host,'user':r.user,'key':str(r.key),'root':r.root,'ext':r.ext,'work':r.work}
-        tid=record_pending(current_job_id(),r.host,marker,web_remote,str(web_glb),kind='glb',host_cfg=cfg)
+        size,sha=r.remote_metadata(web_remote)
+        tid=record_pending(current_job_id(),r.host,marker,web_remote,str(web_glb),kind='glb',expected_size=size,expected_sha256=sha,host_cfg=cfg)
         r.download_dir(renders,output_dir)
-        r.download_compressed(web_remote,web_glb,kind='glb')
-        mark_committed(tid)
-        r.cleanup(marker,committed=True)
+        tid=record_pending(current_job_id(),r.host,marker,web_remote,str(web_glb),kind='glb',expected_size=size,expected_sha256=sha,host_cfg=cfg)
+        r.download_dir(renders,output_dir)
+        r.download_compressed(web_remote,web_glb,expected_size=size,expected_sha256=sha,kind='glb')
+        mark_downloaded(tid);mark_verified(tid)
         _flatten(output_dir/'renders')
     expected={v:output_dir/f'{v}.png' for v in ('front','left-three-quarter','side','back')}
     missing=[v for v,p in expected.items() if not p.exists()]
@@ -519,12 +564,11 @@ def refine_blender(source:Path,output_dir:Path,config_path:Path,log,cancelled,re
         if reference_image:command.extend(['--reference-image',f'{stag}\\{reference_image.name}'])
         log(f'启动远程 Blender 后台自动精修（{r.host}）')
         r.run(command,log,cancelled,timeout=2100,marker=stag)
-        from .transfers import record_pending,mark_committed
+        from .transfers import record_pending,mark_downloaded,mark_verified
         cfg={'host':r.host,'user':r.user,'key':str(r.key),'root':r.root,'ext':r.ext,'work':r.work}
         tid=record_pending(current_job_id(),r.host,marker,rout_dir,str(output_dir),kind='dir',host_cfg=cfg)
         r.download_dir(rout_dir,output_dir)
-        mark_committed(tid)
-        r.cleanup(marker,committed=True)
+        mark_downloaded(tid);mark_verified(tid)
         _flatten(output_dir/'out')
     report=output_dir/'quality-report.json'
     if not report.exists():raise BackendError('Blender 未生成质量报告')
@@ -547,11 +591,11 @@ def export_stl_blender(source:Path,output:Path,scope:str,unit:str,apply_modifier
         if target_height_mm is not None:command.extend(['--target-height-mm',str(target_height_mm)])
         log(f'Blender STL 远程导出启动（{r.host}）：scope={scope}, unit={unit}')
         r.run(command,log,lambda:False,timeout=1200,marker=stag)
-        from .transfers import record_pending,mark_committed
+        from .transfers import record_pending,mark_downloaded,mark_verified
         cfg={'host':r.host,'user':r.user,'key':str(r.key),'root':r.root,'ext':r.ext,'work':r.work}
-        tid=record_pending(current_job_id(),r.host,marker,rout,str(output),kind='file',host_cfg=cfg)
-        r.download_file(rout,output)
-        mark_committed(tid)
-        r.cleanup(marker,committed=True)
+        size,sha=r.remote_metadata(rout)
+        tid=record_pending(current_job_id(),r.host,marker,rout,str(output),kind='file',expected_size=size,expected_sha256=sha,host_cfg=cfg)
+        r.download_file(rout,output,expected_size=size,expected_sha256=sha,kind='file')
+        mark_downloaded(tid);mark_verified(tid)
     if not output.exists() or not output.stat().st_size:raise BackendError('Blender 未生成 STL 文件')
     return output

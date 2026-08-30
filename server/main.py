@@ -398,8 +398,8 @@ def retry(jid:str):
 
 @app.post('/api/jobs/{jid}/resume')
 def resume_transfer(jid:str):
-    """恢复 pending 传输：只重传产物并校验，不重跑推理；成功则继续任务。"""
-    from .transfers import resume_pending,pending_for_job
+    """恢复 pending 传输：只重传产物并校验（mark_verified），不重跑推理；成功则继续任务。"""
+    from .transfers import resume_pending
     snapshot=job_json(jid)
     if snapshot['status']!='transfer_pending':
         raise HTTPException(409,'任务不在 transfer_pending 状态，无法续传')
@@ -407,9 +407,9 @@ def resume_transfer(jid:str):
     if failed:
         with db() as con:
             con.execute("UPDATE jobs SET status='transfer_pending',error_code='TRANSFER_FAILED',error_summary=? WHERE id=?",
-                        (f'续传失败 {len(failed)} 项: {failed[0][1][:200]}',jid))
-        raise HTTPException(502,f'续传失败（{len(failed)} 项），GPU 产物仍保留: {failed[0][1][:200]}')
-    # 全部续传成功 → 继续任务执行（跳过已完成 stage）
+                        (f'续传失败 {failed} 项，GPU 产物仍保留',jid))
+        raise HTTPException(502,f'续传失败（{failed} 项），GPU 产物仍保留')
+    # 全部续传成功（进入 verified）→ 继续任务执行（跳过已完成 stage；产物注册后 commit）
     with db() as con:con.execute("UPDATE jobs SET status='queued',error_code=NULL,error_summary=NULL WHERE id=?",(jid,))
     from .worker import launch
     launch(jid)
