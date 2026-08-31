@@ -6,7 +6,7 @@ short-lived browser session containing stable OIDC claims.
 from __future__ import annotations
 
 import os
-from urllib.parse import urlparse
+from urllib.parse import urlencode, urlparse
 
 from authlib.integrations.starlette_client import OAuth, OAuthError
 from fastapi import APIRouter, HTTPException, Request
@@ -125,7 +125,17 @@ def me(request:Request):
     if not user:return JSONResponse({'authenticated':False},status_code=401)
     return {'authenticated':True,**user,'adminGroup':OIDC_ADMIN_GROUP,'userGroup':OIDC_USER_GROUP}
 
+@router.get('/logout',name='logout')
 @router.post('/logout')
-def logout(request:Request):
+def logout(request:Request,return_to:str='/'):
+    """退出登录：清除本地会话，并（OIDC 启用时）RP-initiated 登出 IdP，
+    否则 SSO 会话仍有效会导致立刻被自动重新登录。"""
+    target=_safe_return_to(return_to)
     request.session.clear()
-    return {'ok':True}
+    if not AUTH_DISABLED and getattr(oauth,'authentik',None):
+        metadata=getattr(oauth.authentik,'server_metadata',{}) or {}
+        end=metadata.get('end_session_endpoint')
+        if end:
+            sep='&' if '?' in end else '?'
+            return RedirectResponse(f'{end}{sep}{urlencode({"post_logout_redirect_uri":target})}')
+    return RedirectResponse(target)

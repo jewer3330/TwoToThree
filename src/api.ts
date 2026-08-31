@@ -28,8 +28,15 @@ const json = async <T>(r: Response): Promise<T> => {
   return r.json();
 };
 export const api = {
-  me: () => fetch('/api/auth/me').then(json<AuthUser>),
-  logout: () => fetch('/api/auth/logout', {method:'POST'}).then(json<{ok:boolean}>),
+  // 未登录时返回 null（不触发 401 跳转），让公开落地页正常渲染。
+  me: () => fetch('/api/auth/me').then(async (r): Promise<AuthUser | null> => {
+    if (r.status === 401) return null;
+    if (!r.ok) {
+      const body = await r.json().catch(() => ({ detail: r.statusText }));
+      throw new Error(body.detail || r.statusText);
+    }
+    return r.json();
+  }),
   health: () => fetch("/api/system/health").then(json),
   stylePresets: () => fetch("/api/style-presets").then(json<StylePreset[]>),
   projects: (query = "") =>

@@ -25,6 +25,7 @@
   display: flex;
   align-items: center;
   gap: 10px;
+  padding: 0;
 }
 .brandmark {
   width: 34px;
@@ -34,15 +35,23 @@
   border-radius: 9px;
   color: #fff;
   background: linear-gradient(135deg, var(--blue, #25a6ff), var(--violet, #7c4dff));
+  box-shadow: none;
+}
+.brandmark svg {
+  width: 17px;
+  height: 17px;
 }
 .brand b {
   display: block;
   font-size: 15px;
   line-height: 1.1;
+  letter-spacing: 0;
 }
 .brand small {
   color: var(--muted, #8d9aac);
   font-size: 11px;
+  letter-spacing: 0;
+  margin-top: 2px;
 }
 .landing-links {
   display: flex;
@@ -106,6 +115,7 @@
   background: transparent;
   border: 1px solid var(--line, #263342);
   color: #e8edf5;
+  box-shadow: none;
 }
 .hero-stats {
   display: flex;
