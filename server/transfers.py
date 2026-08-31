@@ -117,7 +117,9 @@ def _remote_for(p:dict):
     from .backends import Remote
     cfg=json.loads(p['host_cfg']) if p.get('host_cfg') else None
     if not cfg or not cfg.get('host'):raise ValueError('缺少主机连接快照，无法恢复传输')
-    return Remote(cfg['host'],cfg['user'],Path(cfg['key']),cfg.get('root',''),cfg.get('ext',''),cfg.get('work',''))
+    return Remote(cfg['host'],cfg.get('user') or 'root',Path(cfg['key']) if cfg.get('key') else None,
+                  cfg.get('root',''),cfg.get('ext',''),cfg.get('work',''),
+                  os_type=cfg.get('os') or 'windows',port=int(cfg.get('port') or 22),password=cfg.get('password') or '')
 
 def commit_transfer(tid:str):
     """调用方完成 Artifact 持久化注册后显式 commit：标记 committed 并清理远端产物。"""

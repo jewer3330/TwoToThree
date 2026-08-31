@@ -41,6 +41,7 @@ def add_host(cfg:dict)->dict:
         host={'id':'gpu_'+uuid.uuid4().hex[:12],'name':cfg.get('name') or cfg.get('host'),'host':cfg['host'],
               'user':cfg.get('user','d0993'),'key':cfg.get('key',''),'root':cfg.get('root',''),
               'ext':cfg.get('ext',''),'work':cfg.get('work',''),'labels':cfg.get('labels') or [],
+              'os':cfg.get('os') or 'windows','port':int(cfg.get('port') or 22),'password':cfg.get('password') or '',
               'maxConcurrentJobs':int(cfg.get('maxConcurrentJobs',1) or 1),'enabled':bool(cfg.get('enabled',True)),
               'createdAt':now()}
         hosts.append(host);_write(hosts)
@@ -51,7 +52,7 @@ def update_host(host_id:str,patch:dict)->dict:
     with _lock:
         hosts=_read();host=next((h for h in hosts if h['id']==host_id),None)
         if not host:raise KeyError('主机不存在')
-        for k in ('name','user','key','root','ext','work','labels','maxConcurrentJobs'):
+        for k in ('name','user','key','root','ext','work','labels','maxConcurrentJobs','os','port','password'):
             if k in patch:host[k]=patch[k]
         if 'enabled' in patch:host['enabled']=bool(patch['enabled'])
         host.setdefault('createdAt',now())

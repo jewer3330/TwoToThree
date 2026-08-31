@@ -14,7 +14,7 @@ FROM python:3.12-slim
 WORKDIR /app
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/ PIP_DISABLE_PIP_VERSION_CHECK=1
 RUN sed -i 's|deb.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || sed -i 's|deb.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list && \
-    apt-get update && apt-get install -y --no-install-recommends openssh-client curl && rm -rf /var/lib/apt/lists/*
+    apt-get update && apt-get install -y --no-install-recommends openssh-client curl sshpass && rm -rf /var/lib/apt/lists/*
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 COPY server ./server

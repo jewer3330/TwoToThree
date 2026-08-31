@@ -29,6 +29,9 @@ export interface GpuHost {
   root: string;
   ext: string;
   work: string;
+  os: string;
+  port: number;
+  password: string;
   labels: string[];
   maxConcurrentJobs: number;
   enabled: boolean;

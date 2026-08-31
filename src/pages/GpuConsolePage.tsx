@@ -56,7 +56,7 @@ function HostCard({host,onAction}:{host:GpuHost;onAction:(t:'probe'|'toggle'|'de
   </div>;
 }
 
-const EMPTY_HOST={name:'',host:'',user:'d0993',key:'',root:'D:\\print3d\\TwoToThree',ext:'D:\\print3d',work:'D:\\print3d\\work',maxConcurrentJobs:1,enabled:true,labels:''};
+const EMPTY_HOST={name:'',host:'',user:'root',key:'',root:'D:\\print3d\\TwoToThree',ext:'D:\\print3d',work:'D:\\print3d\\work',os:'windows',port:'22',password:'',maxConcurrentJobs:1,enabled:true,labels:''};
 
 export default function GpuConsolePage(){
   const [hosts,setHosts]=useState<GpuHost[]>([]);
@@ -84,7 +84,7 @@ export default function GpuConsolePage(){
   const addHost=async()=>{
     setBusy(true);
     try{
-      const body={...form,labels:form.labels.split(/[,，\s]+/).filter(Boolean),maxConcurrentJobs:Number(form.maxConcurrentJobs)||1};
+      const body={...form,labels:form.labels.split(/[,，\s]+/).filter(Boolean),maxConcurrentJobs:Number(form.maxConcurrentJobs)||1,port:Number(form.port)||22};
       await api.gpuAddHost(body);setAdding(false);setForm(EMPTY_HOST);await refresh();
     }catch(e){alert(`添加失败：${e}`);}finally{setBusy(false);}
   };
@@ -114,9 +114,16 @@ export default function GpuConsolePage(){
       <h3>注册新 GPU 主机</h3>
       <div className="gpu-form-grid">
         <F k="name" label="名称" placeholder="GPU-3 4080"/>
-        <F k="host" label="IP / 主机" placeholder="100.69.5.47"/>
-        <F k="user" label="SSH 用户"/>
-        <F k="key" label="SSH 私钥路径" placeholder="/run/secrets/gpu_key"/>
+        <F k="host" label="IP / 主机" placeholder="connect.westb.seetacloud.com"/>
+        <F k="user" label="SSH 用户" placeholder="root"/>
+        <F k="key" label="SSH 私钥路径" placeholder="/run/secrets/gpu_key（密码登录可留空）"/>
+        <label className="gpu-field">系统
+          <select value={form.os} onChange={e=>{const os=e.target.value;setForm({...form,os,user:os==='linux'&&!form.user?'root':form.user,root:os==='linux'&&form.root.startsWith('D:')?'/root/autodl-tmp/print3d/TwoToThree':form.root,ext:os==='linux'&&form.ext.startsWith('D:')?'/root/autodl-tmp/print3d':form.ext,work:os==='linux'&&form.work.startsWith('D:')?'/root/autodl-tmp/print3d/work':form.work})}}>
+            <option value="windows">Windows</option><option value="linux">Linux</option>
+          </select>
+        </label>
+        <F k="port" label="SSH 端口" placeholder="22"/>
+        <F k="password" label="SSH 密码" placeholder="密码登录时填写"/>
         <F k="root" label="仓库目录"/>
         <F k="ext" label="外部根目录"/>
         <F k="work" label="工作目录"/>
