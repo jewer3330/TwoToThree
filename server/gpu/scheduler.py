@@ -53,12 +53,64 @@ def _dispatcher():
     while True:
         try:
             if not _paused:
+                _autodl_lifecycle()
                 for job in _queued_jobs():
                     host,backend=_pick_host(job)
                     if not host:break
                     if _claim(job,host):_spawn(job,host)
         except Exception:pass
         time.sleep(5)
+
+
+# --------------------------------------------------------------------------- #
+# AutoDL 算力节点生命周期（开机/空闲关机），替代原 autostart 独立线程
+# --------------------------------------------------------------------------- #
+def _has_queued_work()->bool:
+    with db() as con:
+        jobs=con.execute("SELECT COUNT(*) FROM jobs WHERE status='queued'").fetchone()[0]
+        refine=con.execute("SELECT COUNT(*) FROM refinement_jobs WHERE status='queued'").fetchone()[0]
+        revisions=con.execute("SELECT COUNT(*) FROM revision_requests WHERE status='queued'").fetchone()[0]
+        details=con.execute("SELECT COUNT(*) FROM detail_generation_jobs WHERE status='queued'").fetchone()[0]
+    return (jobs+refine+revisions+details)>0
+
+
+def _power_on_autodl(host:dict):
+    from ..autodl import AutoDlClient
+    client=AutoDlClient(host.get('token') or None)
+    client.power_on(host['instanceUuid'], None)
+    hosts.set_state(host['id'],bootRequestedAt=time.time())
+    print(f"[gpu-scheduler] AutoDL 开机：{host.get('name')} ({host['instanceUuid']})")
+
+
+def _power_off_autodl(host:dict):
+    from ..autodl import AutoDlClient
+    client=AutoDlClient(host.get('token') or None)
+    client.power_off(host['instanceUuid'])
+    hosts.set_state(host['id'],shutdownRequestedAt=time.time())
+    print(f"[gpu-scheduler] AutoDL 空闲关机：{host.get('name')} ({host['instanceUuid']})")
+
+
+def _autodl_lifecycle():
+    """AutoDL 节点生命周期：有 queued 任务且实例关机 → 开机（幂等）；
+    在线但空闲超 AUTODL_IDLE_TIMEOUT → 关机。"""
+    from .. import config
+    autodl=[h for h in hosts.list_hosts() if h.get('provider')=='autodl' and h.get('enabled')]
+    if not autodl:return
+    has_work=_has_queued_work()
+    idle_timeout=float(config.AUTODL_IDLE_TIMEOUT or 0)
+    for h in autodl:
+        s=h.get('status',{})
+        try:
+            state=s.get('autodlState','')
+            if has_work and state!='running' and not s.get('bootRequestedAt'):
+                _power_on_autodl(h)
+                continue
+            if idle_timeout>0 and state=='running' and s.get('runningJobs',0)==0:
+                last_activity=s.get('lastActivityAt') or 0.0
+                if last_activity and (time.time()-last_activity)>idle_timeout:
+                    _power_off_autodl(h)
+        except Exception as exc:
+            print(f"[gpu-scheduler] AutoDL 生命周期异常：{exc}")
 
 def _claim(job:dict,host:dict)->bool:
     with _lock:
@@ -69,6 +121,7 @@ def _claim(job:dict,host:dict)->bool:
             con.execute("UPDATE projects SET status='queued',updated_at=? WHERE id=?",(now(),job['project_id']))
             con.execute("INSERT INTO events(job_id,event_type,payload,created_at) VALUES(?,?,?,?)",(job['id'],'job.dispatched',dump({'hostId':host['id'],'host':host.get('name'),'backend':backend_for(job)}),now()))
         hosts.set_running(host['id'],+1)
+        hosts.set_state(host['id'],lastActivityAt=time.time())
         return True
 
 def backend_for(job:dict)->str:

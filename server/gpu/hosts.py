@@ -42,7 +42,15 @@ def add_host(cfg:dict)->dict:
               'user':cfg.get('user','d0993'),'key':cfg.get('key',''),'root':cfg.get('root',''),
               'ext':cfg.get('ext',''),'work':cfg.get('work',''),'labels':cfg.get('labels') or [],
               'maxConcurrentJobs':int(cfg.get('maxConcurrentJobs',1) or 1),'enabled':bool(cfg.get('enabled',True)),
+              'provider':cfg.get('provider','ssh'),
               'createdAt':now()}
+        # AutoDL 节点附加字段（实例生命周期管理）
+        if host['provider']=='autodl':
+            host['instanceUuid']=cfg.get('instanceUuid','')
+            host['token']=cfg.get('token','')
+            host['transfer']=cfg.get('transfer','oss')  # 云实例无内网 CDN，默认 OSS 传输
+        elif cfg.get('transfer'):
+            host['transfer']=cfg.get('transfer')
         hosts.append(host);_write(hosts)
         _probe_pending.add(host['id'])
         return host
@@ -52,6 +60,8 @@ def update_host(host_id:str,patch:dict)->dict:
         hosts=_read();host=next((h for h in hosts if h['id']==host_id),None)
         if not host:raise KeyError('主机不存在')
         for k in ('name','user','key','root','ext','work','labels','maxConcurrentJobs'):
+            if k in patch:host[k]=patch[k]
+        for k in ('provider','instanceUuid','token','transfer'):
             if k in patch:host[k]=patch[k]
         if 'enabled' in patch:host['enabled']=bool(patch['enabled'])
         host.setdefault('createdAt',now())
@@ -67,6 +77,34 @@ def delete_host(host_id:str):
 def set_state(host_id:str,**kv):
     with _lock:
         s=_state.setdefault(host_id,{});s.update(kv);s['lastProbeAt']=now()
+
+def ensure_autodl_registered():
+    """从 env 自动注册 AutoDL 算力节点（provider=autodl）。
+
+    配了 AUTODL_TOKEN + AUTODL_INSTANCE_UUID 且没有对应节点时自动加入注册表，
+    由调度器统一管理开机/空闲关机。幂等。
+    """
+    from .. import config
+    if not (config.AUTODL_TOKEN and config.AUTODL_INSTANCE_UUID):
+        return None
+    with _lock:
+        hosts=_read()
+        for h in hosts:
+            if h.get('provider')=='autodl' and h.get('instanceUuid')==config.AUTODL_INSTANCE_UUID:
+                return h
+        # 主机注册需要 host（SSH 地址）；env 未提供时给占位，探测会标记未就绪
+        host=add_host({
+            'name':config.AUTODL_NAME or 'AutoDL',
+            'host':config.AUTODL_HOST or config.AUTODL_INSTANCE_UUID,
+            'user':config.AUTODL_SSH_USER or 'root',
+            'key':config.AUTODL_SSH_KEY or '',
+            'root':config.AUTODL_REPO_ROOT or r'D:\print3d\TwoToThree',
+            'ext':config.AUTODL_EXT_ROOT or r'D:\print3d',
+            'work':config.AUTODL_WORK_DIR or r'D:\print3d\work',
+            'provider':'autodl','instanceUuid':config.AUTODL_INSTANCE_UUID,
+            'token':config.AUTODL_TOKEN,'transfer':'oss',
+        })
+        return host
 
 def set_running(host_id:str|None,delta:int):
     with _lock:

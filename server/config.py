@@ -50,16 +50,31 @@ CONTROL_TIMEOUT = float(_env("CONTROL_TIMEOUT", "30") or "30")
 
 
 # --------------------------------------------------------------------------- #
-# AutoDL（显卡机自动启停）
+# AutoDL（显卡机自动启停，作为 GPU 集群 provider=autodl 节点）
 # --------------------------------------------------------------------------- #
 AUTODL_TOKEN = _env("AUTODL_TOKEN", "")
 AUTODL_INSTANCE_UUID = _env("AUTODL_INSTANCE_UUID", "")
 # 显卡机空闲多少秒后自动关机（0 = 禁用自动关机）
 AUTODL_IDLE_TIMEOUT = float(_env("AUTODL_IDLE_TIMEOUT", "900") or "0")
-# 总控 autostart 轮询间隔（秒）
+# 总控 autostart 轮询间隔（秒，AutoDL 生命周期检查并入调度器后仅作参考）
 AUTOSTART_POLL_INTERVAL = float(_env("AUTOSTART_POLL_INTERVAL", "15") or "15")
 # 开机后 worker 启动命令（可选，覆盖 AutoDL 创建实例时设置）
 AUTODL_START_COMMAND = _env("AUTODL_START_COMMAND", "")
+# 节点注册信息（SSH 访问 AutoDL 实例）
+AUTODL_NAME = _env("AUTODL_NAME", "AutoDL-GPU")
+AUTODL_HOST = _env("AUTODL_HOST", "")          # AutoDL 实例 SSH 地址 host:port
+AUTODL_SSH_USER = _env("AUTODL_SSH_USER", "root")
+AUTODL_SSH_KEY = _env("AUTODL_SSH_KEY", "")
+AUTODL_REPO_ROOT = _env("AUTODL_REPO_ROOT", "")  # 远端仓库目录（含 pipeline/server）
+AUTODL_EXT_ROOT = _env("AUTODL_EXT_ROOT", "")    # 远端本地环境根（python/权重/Blender 所在）
+AUTODL_WORK_DIR = _env("AUTODL_WORK_DIR", "")
+
+
+# --------------------------------------------------------------------------- #
+# 传输层（可插拔：OSS 对象存储 / CDN+scp 节点直传）
+# --------------------------------------------------------------------------- #
+# auto = 配了 OSS 凭据用 OSS，否则 CDN+scp；oss = 强制对象存储；cdn = 强制 CDN+scp
+STORAGE_BACKEND = (_env("STORAGE_BACKEND", "auto") or "auto").strip().lower()
 
 
 # --------------------------------------------------------------------------- #

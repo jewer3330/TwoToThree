@@ -46,21 +46,39 @@ def bind_host(cfg:dict|None):
     """绑定当前线程执行主机（worker 领取任务时调用）。cfg=None 解除绑定。"""
     if cfg is None:
         _local.remote=None;return
-    _local.remote=Remote(cfg['host'],cfg['user'],Path(cfg['key']),cfg['root'],cfg['ext'],cfg['work'])
+    _local.remote=Remote(cfg['host'],cfg['user'],Path(cfg['key']),cfg['root'],cfg['ext'],cfg['work'],transfer=cfg.get('transfer'))
 
 def remote_from_cfg(cfg:dict)->Remote|None:
     if not cfg or not cfg.get('host'):return None
-    return Remote(cfg['host'],cfg['user'] or 'd0993',Path(cfg['key']),cfg['root'] or '',cfg['ext'] or '',cfg['work'] or '')
+    return Remote(cfg['host'],cfg['user'] or 'd0993',Path(cfg['key']),cfg['root'] or '',cfg['ext'] or '',cfg['work'] or '',transfer=cfg.get('transfer'))
 
 class Remote:
-    def __init__(self,host,user,key,root,ext,work):
+    def __init__(self,host,user,key,root,ext,work,transfer:str|None=None):
         self.host=host;self.user=user;self.key=key;self.root=root;self.ext=ext;self.work=work
+        # 传输后端：节点级 transfer 优先（'oss'|'cdn'），缺省按全局 STORAGE_BACKEND/auto 解析
+        from .storage import resolve_transfer_backend
+        self.transfer=resolve_transfer_backend({'transfer':transfer} if transfer else None)
+        self._oss=None
         self.base=['ssh','-i',str(key),'-o','BatchMode=yes','-o','ConnectTimeout=15','-o','StrictHostKeyChecking=accept-new',f'{user}@{host}']
         # CDN 候选（GPU 节点从主控 CDN 下载，绕开 tailscale relay 慢路径）：局域网→tailscale→公网
         self.cdn_urls=[u for u in os.environ.get('PRINT3D_CDN_URLS','http://192.168.31.210:12080,https://cdn.lovesun.top').split(',') if u]
         # 回传中转：GPU 压缩后公网 PUT 到 upload 端点，主控从本地 upload 卷读取（绕开 DERP 回传慢）
         self.upload_url=os.environ.get('PRINT3D_UPLOAD_URL','https://cdn.lovesun.top/upload')
         self.upload_dir=Path(os.environ.get('PRINT3D_UPLOAD_DIR','/Volumes/ssd/servers/print3d_server/upload'))
+
+    @property
+    def oss(self):
+        """惰性 OSS 传输（transfer='oss' 时使用）。"""
+        if self._oss is None:
+            from .storage import OssStorage
+            self._oss=OssStorage()
+        return self._oss
+
+    def _oss_key(self,remote_abs:str)->str:
+        """节点绝对路径 → OSS 对象键（gpu-transfer/{marker}/{basename}）。"""
+        name=remote_abs.replace('\\','/').split('/')[-1]
+        marker=remote_abs.replace('\\','/').split('/')[-2] if '/' in remote_abs.replace('\\','/') else 'job'
+        return f'gpu-transfer/{marker}/{name}'
     def _q(self,arg):
         if '"' in arg:arg=arg.replace('"','\\"')
         return f'"{arg}"'
@@ -112,6 +130,9 @@ class Remote:
         for p in locals_:
             if p.exists():
                 target=f'{stag}\\{p.name}'
+                if self.transfer=='oss':
+                    self._prepare_via_oss(marker,p,target)
+                    continue
                 for attempt in range(3):
                     try:
                         self.upload(p,target);break
@@ -119,6 +140,37 @@ class Remote:
                         if attempt==2:raise
                         self.cmd(['powershell','-NoProfile','-Command',f'New-Item -ItemType Directory -Force -Path {stag} | Out-Null'])
                         time.sleep(4)
+    def _prepare_via_oss(self,marker:str,local:Path,target:str):
+        """OSS 传输：总控上传 → 节点 curl 从签名 URL 拉取（公网可达，无需 CDN/scp）。"""
+        key=self._oss_key(target)
+        self.oss.upload(local,key)
+        url=self.oss.sign_get(key)
+        target_win=target.replace('/','\\')
+        out=self.cmd(['powershell','-NoProfile','-Command',
+                      f"curl.exe -fL -sS -o '{target_win}' '{url}'; if(Test-Path '{target_win}'){{$true}}else{{exit 1}}"],timeout=300)
+        if out.returncode!=0:raise BackendError(f'OSS 拉取输入失败：{local.name}')
+    def _pull_via_oss(self,remote_file:str,local_file:Path):
+        """OSS 传输：节点 tar.gz → curl PUT 签名 URL → 总控 OSS 下载解压。"""
+        import tarfile
+        remote_file=remote_file.replace('/','\\')
+        remote_dir=remote_file.rsplit('\\',1)[0];remote_name=remote_file.rsplit('\\',1)[1]
+        tgz_remote=f'{remote_file}.tgz'
+        key=self._oss_key(tgz_remote)
+        put_url=self.oss.sign_put(key)
+        out=self.cmd(['powershell','-NoProfile','-Command',
+                      f"tar -czf '{tgz_remote}' -C '{remote_dir}' '{remote_name}'; if(Test-Path '{tgz_remote}'){{$true}}else{{exit 1}}"],timeout=180)
+        if out.returncode!=0:raise BackendError('OSS 回传：节点压缩失败')
+        put=self.cmd(['curl.exe','-s','-X','PUT','-T',tgz_remote,f"'{put_url}'",'-w','%{http_code}'],timeout=300)
+        if not (put.returncode==0 and put.stdout.strip() in ('200','201','204')):
+            raise BackendError('OSS 回传：PUT 失败')
+        local_file.parent.mkdir(parents=True,exist_ok=True)
+        tmp=local_file.with_suffix(local_file.suffix+'.tgz')
+        try:
+            self.oss.download(key,tmp)
+            with tarfile.open(tmp,'r:gz') as t:t.extract(local_file.name,str(local_file.parent))
+            if not local_file.exists():raise BackendError('OSS 回传解压未生成目标文件')
+        finally:
+            tmp.unlink(missing_ok=True)
     def cmd(self,command,timeout:int=25):
         args=' '.join("'"+a.replace("'","''")+"'" for a in command)
         script=f'[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; & {args}'
@@ -181,6 +233,22 @@ class Remote:
         local_dir.mkdir(parents=True,exist_ok=True)
         tmp=local_dir/f'{name}.tgz'
         try:
+            if self.transfer=='oss':
+                key=self._oss_key(f'{remote_dir}.tgz')
+                put_url=self.oss.sign_put(key)
+                out=self.cmd(['powershell','-NoProfile','-Command',
+                              f"tar -czf '{remote_dir}.tgz' -C '{parent}' '{name}'; if(Test-Path '{remote_dir}.tgz'){{$true}}else{{exit 1}}"],timeout=180)
+                if out.returncode==0:
+                    put=self.cmd(['curl.exe','-s','-X','PUT','-T',f'{remote_dir}.tgz',f"'{put_url}'",'-w','%{http_code}'],timeout=300)
+                    if put.returncode==0 and put.stdout.strip() in ('200','201','204'):
+                        self.oss.download(key,tmp)
+                        with tarfile.open(tmp,'r:gz') as t:t.extractall(str(local_dir))
+                        child=local_dir/name
+                        if child.is_dir() and child!=local_dir:
+                            for item in list(child.iterdir()):shutil.move(str(item),str(local_dir))
+                            shutil.rmtree(child,ignore_errors=True)
+                        return
+                raise BackendError('OSS 回传目录失败')
             # 方案A：公网 PUT 中转（绕开 DERP 回传）
             if self.push_via_upload(remote_dir) and self.pull_via_upload(f'{remote_dir}.tgz',tmp):
                 with tarfile.open(tmp,'r:gz') as t:t.extractall(str(local_dir))
@@ -201,13 +269,20 @@ class Remote:
             tmp.unlink(missing_ok=True)
     def download_file(self,remote_file:str,local_file:Path):
         local_file.parent.mkdir(parents=True,exist_ok=True)
+        if self.transfer=='oss':
+            self._pull_via_oss(remote_file,local_file)
+            return
         self._retry(lambda:subprocess.run(self._scp_cmd()+[f'{self.user}@{self.host}:{remote_file.replace(chr(92),"/")}',str(local_file)],check=True,timeout=300))
     def download_compressed(self,remote_file:str,local_file:Path):
         """远端 tar.gz 压缩后回传，本地解压。
 
-        优先走公网 PUT 中转（GPU→upload 端点→主控 upload 卷，绕开 DERP）；
-        失败则 scp 压缩回传兜底。
+        传输后端可选：
+          - oss：节点压缩 → curl PUT 签名 URL → 总控 OSS 下载（公网可达，无需 SSH 回传）
+          - cdn：公网 PUT 中转（GPU→upload 端点→主控 upload 卷）→ scp 压缩兜底
         """
+        if self.transfer=='oss':
+            self._pull_via_oss(remote_file,local_file)
+            return
         import tarfile
         remote_file=remote_file.replace('/','\\')
         remote_dir=remote_file.rsplit('\\',1)[0];remote_name=remote_file.rsplit('\\',1)[1]
@@ -309,8 +384,29 @@ def _remote_capabilities(r:Remote|None=None)->dict:
         except Exception:pass
     _caps_cache=caps;_caps_at=time.monotonic();return caps
 
+def _probe_autodl_state(cfg:dict)->dict:
+    """查询 AutoDL 实例生命周期状态（开机/关机/运行中）。失败返回 unknown。"""
+    try:
+        from .autodl import AutoDlClient
+        token=cfg.get('token') or ''
+        client=AutoDlClient(token or None)
+        state=client.status(cfg.get('instanceUuid') or '')
+        return {'running':state=='running','state':state}
+    except Exception as exc:
+        return {'running':False,'state':'unknown','error':str(exc)[:120]}
+
 def probe_host(cfg:dict)->dict:
-    """探测一台主机的完整健康状态（GPU/显存/磁盘/能力）。供 GPU 控制面板轮询。"""
+    """探测一台主机的完整健康状态（GPU/显存/磁盘/能力）。供 GPU 控制面板轮询。
+
+    provider='autodl' 的节点先查 AutoDL 实例生命周期状态：非 running（关机/开机中）
+    直接返回 offline + autodlState，不浪费 SSH 探测；running 时继续 SSH 探测。
+    """
+    if cfg.get('provider')=='autodl':
+        autodl=_probe_autodl_state(cfg)
+        if not autodl.get('running'):
+            return {'online':False,'gpu':None,'memTotal':None,'memUsed':None,'diskFree':None,
+                    'latencyMs':None,'route':'autodl','caps':{},'lastError':None,
+                    'autodlState':autodl.get('state','unknown')}
     r=remote_from_cfg(cfg)
     if not r:return {'online':False,'gpu':None,'memTotal':None,'memUsed':None,'diskFree':None,'latencyMs':None,'route':None,'caps':{},'lastError':'no remote'}
     result={'online':False,'gpu':None,'memTotal':None,'memUsed':None,'diskFree':None,'latencyMs':None,'route':None,'caps':{},'lastError':None}

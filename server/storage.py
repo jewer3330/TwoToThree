@@ -58,6 +58,32 @@ class OssStorage:
             # 旧版 oss2 没有 slash_safe 参数。
             return self.bucket.sign_url("GET", key, expiry)
 
+    def sign_put(self, oss_path: str, expires: int | None = None) -> str:
+        """生成 PUT 签名 URL，供节点端 curl 直传产物到 OSS。"""
+        key = self.key(oss_path)
+        expiry = expires or config.OSS_URL_EXPIRES
+        try:
+            return self.bucket.sign_url("PUT", key, expiry, slash_safe=True)
+        except TypeError:
+            return self.bucket.sign_url("PUT", key, expiry)
+
+
+def resolve_transfer_backend(node_cfg: dict | None = None) -> str:
+    """决定文件传输后端：节点级 transfer 优先，其次全局 STORAGE_BACKEND。
+
+    返回值：'oss'（对象存储，公网可达）或 'cdn'（CDN+scp，SSH 节点直传）。
+    """
+    node = ((node_cfg or {}).get("transfer") or "").strip().lower()
+    if node in ("oss", "cdn"):
+        return node
+    backend = (config.STORAGE_BACKEND or "auto").strip().lower()
+    if backend in ("oss", "cdn"):
+        return backend
+    # auto：有完整 OSS 凭据则用 OSS，否则 CDN+scp
+    if config.OSS_BUCKET and config.OSS_ACCESS_KEY_ID and config.OSS_ACCESS_KEY_SECRET:
+        return "oss"
+    return "cdn"
+
 
 class Storage:
     """门面：OSS 可用时提供对象存储操作，否则明确报错。"""

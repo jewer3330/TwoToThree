@@ -18,6 +18,10 @@ class _ProbeWorker(threading.Thread):
         except Exception as exc:
             status={'online':False,'lastError':str(exc)[:200]}
         status['_tick']=int(time.monotonic())
+        # AutoDL 实例已运行 → 开机请求完成，允许下次调度触发新的开机
+        if status.get('autodlState')=='running':
+            status['bootRequestedAt']=None
+            status['shutdownRequestedAt']=None
         hosts.set_state(self.h['id'],**status)
 
 class ProbeThread(threading.Thread):

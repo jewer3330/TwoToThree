@@ -11,9 +11,11 @@ router=APIRouter(prefix='/api/gpu',tags=['gpu'])
 class HostInput(BaseModel):
     name:str|None=None;host:str=Field(min_length=3);user:str='d0993';key:str='';root:str='';ext:str='';work:str=''
     labels:list[str]=[];maxConcurrentJobs:int=1;enabled:bool=True
+    provider:str='ssh';instanceUuid:str='';token:str='';transfer:str|None=None
 class HostPatch(BaseModel):
     name:str|None=None;user:str|None=None;key:str|None=None;root:str|None=None;ext:str|None=None;work:str|None=None
     labels:list[str]|None=None;maxConcurrentJobs:int|None=None;enabled:bool|None=None
+    provider:str|None=None;instanceUuid:str|None=None;token:str|None=None;transfer:str|None=None
 
 @router.get('/hosts')
 def list_hosts():return hosts.list_hosts()
@@ -60,5 +62,10 @@ def overview():
 
 def start_services():
     from .probe import ProbeThread
+    # AutoDL 节点从 env 自动注册（幂等），与其他 SSH 节点一起被调度
+    try:
+        hosts.ensure_autodl_registered()
+    except Exception as exc:
+        print(f"[gpu] AutoDL 节点注册失败：{exc}")
     ProbeThread(interval=30).start()
     scheduler.SchedulerThread().start()
