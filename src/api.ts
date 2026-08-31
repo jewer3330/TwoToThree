@@ -322,4 +322,4 @@ export const api = {
   printerPrint: (id: string, body: unknown) => fetch(`/api/print/printers/${id}/print`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }).then(json<Record<string, unknown>>),
 };
 
-export type AuthUser={authenticated:true;sub:string;name:string;email:string;role:'admin'|'user';groups:string[]};
+export type AuthUser={authenticated:true;sub:string;name:string;email:string;role:'admin'|'user';groups:string[];adminGroup?:string;userGroup?:string};

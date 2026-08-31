@@ -32,7 +32,7 @@ if OIDC_ISSUER and OIDC_CLIENT_ID:
         client_id=OIDC_CLIENT_ID,
         client_secret=OIDC_CLIENT_SECRET,
         server_metadata_url=f'{OIDC_ISSUER}/.well-known/openid-configuration',
-        client_kwargs={'scope':'openid profile email'},
+        client_kwargs={'scope':'openid profile email','timeout':30},
     )
 
 router=APIRouter(prefix='/api/auth',tags=['auth'])
@@ -46,6 +46,12 @@ def validate_config() -> None:
     if missing:raise RuntimeError('鉴权已启用但缺少配置: '+', '.join(missing))
     secret=os.environ['SESSION_SECRET']
     if len(secret)<32:raise RuntimeError('SESSION_SECRET 至少需要 32 个字符')
+
+async def prefetch_metadata() -> None:
+    """Pre-fetch OIDC discovery metadata at startup so the first login isn't slow."""
+    if not (OIDC_ISSUER and OIDC_CLIENT_ID and getattr(oauth,'authentik',None)):return
+    try:await oauth.authentik.load_server_metadata()
+    except Exception:pass  # will retry on first login request
 
 def _safe_return_to(value:str|None)->str:
     if not value:return '/'
@@ -68,6 +74,8 @@ def _is_admin(user:dict)->bool:return user.get('role')=='admin'
 def requires_admin(path:str,method:str)->bool:
     # GPU 与打印机注册表包含 SSH key、IP、access code，全部仅管理员可见。
     if path.startswith('/api/gpu') or path.startswith('/api/printer'):return True
+    # AutoDL 实例生命周期（开机/关机）与存储配置状态仅管理员可见。
+    if path.startswith('/api/autodl') or path=='/api/system/storage':return True
     if path.startswith('/api/print/') and method in {'DELETE'}:return True
     return False
 
@@ -82,7 +90,9 @@ async def login(request:Request,return_to:str='/'):
     if not getattr(oauth,'authentik',None):raise HTTPException(503,'OIDC 尚未配置')
     request.session['return_to']=_safe_return_to(return_to)
     callback=OIDC_REDIRECT_URI or str(request.url_for('auth_callback'))
-    return await oauth.authentik.authorize_redirect(request,callback)
+    try:return await oauth.authentik.authorize_redirect(request,callback)
+    except Exception as exc:
+        raise HTTPException(503,f'OIDC 服务暂时不可用，请稍后重试：{exc}') from exc
 
 @router.get('/callback',name='auth_callback')
 async def callback(request:Request):
@@ -113,7 +123,7 @@ async def callback(request:Request):
 def me(request:Request):
     user=session_user(request)
     if not user:return JSONResponse({'authenticated':False},status_code=401)
-    return {'authenticated':True,**user}
+    return {'authenticated':True,**user,'adminGroup':OIDC_ADMIN_GROUP,'userGroup':OIDC_USER_GROUP}
 
 @router.post('/logout')
 def logout(request:Request):

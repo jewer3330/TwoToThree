@@ -20,10 +20,13 @@ from .backends import capabilities,refine_blender,generate_hunyuan,generate_huny
 from .detail_provider import generate as generate_detail_candidate,stop_server as stop_detail_server
 from .style_presets import DEFAULT_STYLE, public_style_presets, style_preset
 from . import auth
+from . import autodl
+from . import oss
 
 @asynccontextmanager
 async def lifespan(_:FastAPI):
     auth.validate_config()
+    await auth.prefetch_metadata()
     from . import transfers
     transfers.init_db()
     init_db();seed_demo();gpu_routes.start_services();printer_routes.start_services()
@@ -60,6 +63,7 @@ app.include_router(auth.router)
 app.include_router(gpu_routes.router)
 app.include_router(printer_routes.router)
 app.include_router(printpipeline_routes.router)
+app.include_router(autodl.router)
 
 class ProjectInput(BaseModel):
     name:str=Field(min_length=1,max_length=60);subjectType:str='character';intendedUse:str='web';quality:str='standard';modelStyle:Literal['realistic','cartoon','chibi']=DEFAULT_STYLE;visualConditioningMode:Literal['auto','original','contour','rgb_depth']='auto';segmentationRequired:bool=False;rigRequired:bool=False;preserveFeatures:str='';notes:str=''
@@ -205,6 +209,22 @@ def get_project(pid):
     with db() as con:r=con.execute('SELECT * FROM projects WHERE id=?',(pid,)).fetchone()
     if not r:raise HTTPException(404,'项目不存在')
     return r
+
+@app.get('/api/system/storage')
+def storage_status():
+    """存储与算力配置状态（仅管理员；不返回任何凭据）。"""
+    return {
+        'oss': {
+            'configured': oss.configured(),
+            'bucket': oss.OSS_BUCKET,
+            'endpoint': oss.OSS_ENDPOINT,
+            'publicEndpoint': oss._host(),
+        },
+        'autodl': {
+            'configured': autodl.configured(),
+            'apiBase': autodl.AUTODL_API_BASE,
+        },
+    }
 
 @app.get('/api/system/health')
 async def health():
