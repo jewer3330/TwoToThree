@@ -1,0 +1,98 @@
+{
+  "version": "2.0",
+  "baseline": {
+    "model": "Wan 2.2 TI2V 5B FP16",
+    "width": 640,
+    "height": 352,
+    "fps": 24,
+    "frames": 33,
+    "steps": 12,
+    "cfg": 5,
+    "denoise": 1.0
+  },
+  "continuity_lock": "完全保持参考图中的两只拟人猫、服装、毛色、脸型、身体比例、复古餐厅、暖色钨丝灯、青绿色幕布和黑白棋盘地面。黑猫始终位于场景左侧，橘猫始终位于场景右侧，两只猫保持间距且互不接触。前5帧准备，第6至28帧完成动作，第29至33帧稳定落位。",
+  "global_negative": "角色互换位置，跨越轴线，身体融合，角色接触，多余肢体，缺少肢体，猫脸改变，毛色改变，服装改变，体型改变，背景改变，棋盘地面扭曲，跳跃，旋转，换位，镜头移动，镜头抖动，大块色斑，画面撕裂，文字，水印",
+  "shots": [
+    {
+      "shot": "A01",
+      "group": "A",
+      "camera": "正面双人全景，平视，固定镜头",
+      "seed": 20260901,
+      "reference": "keyframes/two-cats-previs-S01-wide.png",
+      "keyframe_status": "reuse-v1",
+      "action": "两只猫同步做缓慢清晰的左右小踏步：左脚向外踏出再收回，随后右脚向外踏出再收回；膝盖轻微弯曲，双腿不交叉，脚掌贴地。"
+    },
+    {
+      "shot": "A02",
+      "group": "A",
+      "camera": "左前方30度双人中全景，黑猫略近，固定镜头，双脚完整入画",
+      "seed": 20260902,
+      "reference": "keyframes/pending/A02-left-30.png",
+      "keyframe_status": "approved",
+      "action": "与A01完全相同的左右小踏步、相同起始脚和相同节奏；左脚先动，随后右脚，动作幅度克制。"
+    },
+    {
+      "shot": "A03",
+      "group": "A",
+      "camera": "场景右侧低机位腿脚近景，棋盘地面明显，固定镜头",
+      "seed": 20260903,
+      "reference": "keyframes/pending/A03-right-low-feet.png",
+      "keyframe_status": "approved",
+      "action": "与A01完全相同的脚步相位：左脚先向外踏出收回，再由右脚向外踏出收回；四条腿清楚分离，脚掌始终贴地。"
+    },
+    {
+      "shot": "B01",
+      "group": "B",
+      "camera": "正面双人中景，腰部以上为主，固定镜头",
+      "seed": 20260911,
+      "reference": "keyframes/two-cats-previs-S02-medium.png",
+      "keyframe_status": "reuse-v1",
+      "action": "两只猫同步做克制的上身律动：左肩先向前，前臂向左摆；随后右肩向前，前臂向右摆；身体轻微扭转，手臂不过肩。"
+    },
+    {
+      "shot": "B02",
+      "group": "B",
+      "camera": "右前方30度双人中近景，橘猫略近，两张脸都清楚，固定镜头",
+      "seed": 20260912,
+      "reference": "keyframes/pending/B02-right-30-medium.png",
+      "keyframe_status": "approved",
+      "action": "与B01完全相同的肩膀和前臂节奏：左肩先向前，再换右肩；两只猫同步，动作小而清晰。"
+    },
+    {
+      "shot": "B03",
+      "group": "B",
+      "camera": "场景左侧侧面双人轮廓中景，两只猫前后不重叠，固定镜头",
+      "seed": 20260913,
+      "reference": "keyframes/pending/B03-side-medium.png",
+      "keyframe_status": "approved",
+      "action": "与B01完全相同的左右肩交替和躯干轻微扭转；保持两只猫轮廓分离，不转身，不换位。"
+    },
+    {
+      "shot": "C01",
+      "group": "C",
+      "camera": "正面双人全景，平视，固定镜头",
+      "seed": 20260921,
+      "reference": "keyframes/two-cats-previs-S01-wide.png",
+      "keyframe_status": "reuse-v1-layout",
+      "action": "两只猫先各做一次小幅屈膝，然后双脚收回站稳；最后同步抬起外侧前臂形成简洁定格，保持左右位置不变。"
+    },
+    {
+      "shot": "C02",
+      "group": "C",
+      "camera": "左前方30度双人中景，两张猫脸和上身清楚，固定镜头",
+      "seed": 20260922,
+      "reference": "keyframes/pending/C02-left-30-medium.png",
+      "keyframe_status": "approved",
+      "action": "两只猫保持首帧中的外侧前臂定格姿态，只做一次极小幅屈膝后回稳；手臂不再大幅移动，表情和视线稳定。"
+    },
+    {
+      "shot": "C03",
+      "group": "C",
+      "camera": "棋盘地面低机位广角，脚掌占画面下半部，两只猫身体仍部分入画，固定镜头",
+      "seed": 20260923,
+      "reference": "keyframes/pending/C03-floor-low-wide.png",
+      "keyframe_status": "approved",
+      "action": "与C01完全相同的收尾脚步：小幅屈膝后两组脚掌同时收回并牢固落地，最终静止；双腿不交叉。"
+    }
+  ]
+}

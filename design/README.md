@@ -10,3 +10,9 @@
 6. `06-preview-acceptance.png` — 3D 预览与验收
 
 视觉方向：深色工业创作工具、青蓝/紫色主强调色、语义化质量状态、证据优先的生产工作台。
+
+## 设计与落地文档
+
+- `2D_TO_3D_STUDIO_IMPLEMENTATION_SPEC.md` — 产品、页面和总体技术规范
+- `LOCAL_AI_REFERENCE_EDIT_ARCHITECTURE.md` — 评论驱动的本地 AI 修订参考图架构
+- `AI_DETAIL_AUGMENTATION_IMPLEMENTATION_PLAN.md` — 上传后 AI 细节补充功能的分阶段落地计划

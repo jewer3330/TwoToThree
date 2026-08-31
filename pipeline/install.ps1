@@ -1,6 +1,6 @@
 param([ValidateSet('all','sf3d','triposr')][string]$Backend = 'all')
 $ErrorActionPreference = 'Stop'
-$root = Split-Path -Parent $PSScriptRoot; $local = Join-Path $root '.local'
+$root = Split-Path -Parent $PSScriptRoot; $externalRoot = if ($env:STUDIO_EXTERNAL_ROOT) { $env:STUDIO_EXTERNAL_ROOT } else { Join-Path $HOME 'AIData\3d' }; $local = Join-Path $externalRoot 'local'
 function Install-Backend([string]$name,[string]$folder) {
   $repo = Join-Path $local $folder; if (!(Test-Path (Join-Path $repo 'requirements.txt'))) { throw "$name source missing. Run npm run model:setup." }
   $venv = Join-Path $repo '.venv-runtime'; $basePython = uv python find 3.10; if ($LASTEXITCODE -ne 0) { throw 'Python 3.10 is unavailable.' }; & $basePython -m venv $venv; if ($LASTEXITCODE -ne 0) { throw "$name venv creation failed." }; $python = Join-Path $venv 'Scripts\python.exe'
