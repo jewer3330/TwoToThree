@@ -50,6 +50,19 @@ CONTROL_TIMEOUT = float(_env("CONTROL_TIMEOUT", "30") or "30")
 
 
 # --------------------------------------------------------------------------- #
+# AutoDL（显卡机自动启停）
+# --------------------------------------------------------------------------- #
+AUTODL_TOKEN = _env("AUTODL_TOKEN", "")
+AUTODL_INSTANCE_UUID = _env("AUTODL_INSTANCE_UUID", "")
+# 显卡机空闲多少秒后自动关机（0 = 禁用自动关机）
+AUTODL_IDLE_TIMEOUT = float(_env("AUTODL_IDLE_TIMEOUT", "900") or "0")
+# 总控 autostart 轮询间隔（秒）
+AUTOSTART_POLL_INTERVAL = float(_env("AUTOSTART_POLL_INTERVAL", "15") or "15")
+# 开机后 worker 启动命令（可选，覆盖 AutoDL 创建实例时设置）
+AUTODL_START_COMMAND = _env("AUTODL_START_COMMAND", "")
+
+
+# --------------------------------------------------------------------------- #
 # 后端可执行文件 / 权重路径（Windows 与 Linux 自动探测，env 优先）
 # --------------------------------------------------------------------------- #
 def _default_hunyuan_py() -> str:
