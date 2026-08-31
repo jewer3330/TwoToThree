@@ -33,3 +33,7 @@ assessment.json
 detail-inventory.json
 object-sculpt-spec.json
 review-layers.json
+
+# Codely CLI 本地记忆（不入库）
+CODELY.md
+.codely-cli/
