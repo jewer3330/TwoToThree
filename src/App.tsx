@@ -1,5 +1,7 @@
-import {Activity, ArrowLeft, Boxes, ChevronRight, Cpu, FolderKanban, Gauge, HardDrive, Home, Layers3, Menu, Plus, Printer as PrinterIcon, Scissors, Search, Settings, SlidersHorizontal, Sparkles} from 'lucide-react';
+import {Activity, ArrowLeft, Boxes, ChevronRight, Cpu, FolderKanban, Gauge, HardDrive, Home, Layers3, LogOut, Menu, Plus, Printer as PrinterIcon, Scissors, Search, Settings, SlidersHorizontal, Sparkles} from 'lucide-react';
 import {Link, NavLink, Navigate, Route, Routes, useLocation, useNavigate} from 'react-router-dom';
+import {useEffect,useState} from 'react';
+import {api,type AuthUser} from './api';
 import Dashboard from './pages/Dashboard';
 import CreateProject from './pages/CreateProject';
 import ValidationPage from './pages/ValidationPage';
@@ -20,7 +22,7 @@ import GpuConsolePage from './pages/GpuConsolePage';
 import PrinterConsolePage from './pages/PrinterConsolePage';
 import PrintWorkflowPage from './pages/PrintWorkflowPage';
 
-const nav=[['/',Home,'工作台'],['/projects',FolderKanban,'项目管理'],['/parts-lab',Scissors,'部件切分实验'],['/assets',Layers3,'素材管理'],['/queue',Activity,'任务队列'],['/gpu',Cpu,'GPU 控制台'],['/printer',PrinterIcon,'打印机'],['/print-workflow',SlidersHorizontal,'打印工作台'],['/library',Boxes,'模型 / 资产库'],['/settings',Settings,'系统设置']] as const;
+const nav=[['/',Home,'工作台',false],['/projects',FolderKanban,'项目管理',false],['/parts-lab',Scissors,'部件切分实验',false],['/assets',Layers3,'素材管理',false],['/queue',Activity,'任务队列',false],['/gpu',Cpu,'GPU 控制台',true],['/printer',PrinterIcon,'打印机',true],['/print-workflow',SlidersHorizontal,'打印工作台',false],['/library',Boxes,'模型 / 资产库',false],['/settings',Settings,'系统设置',true]] as const;
 function Placeholder({title}:{title:string}){return <div className="empty"><Boxes/><h2>{title}</h2><p>该入口将在后续版本开放，当前 MVP 聚焦完整转换与验收流程。</p></div>}
 const pageNames: Array<[RegExp,string]> = [
   [/^\/create$/, '新建项目'], [/^\/validation\//, '素材校验'], [/^\/plan\//, '方案确认'],
@@ -48,8 +50,10 @@ function Breadcrumbs(){
   </nav>;
 }
 
-function Shell(){const loc=useLocation(); const focused=/\/(create|validation|plan|jobs|review|refinement|revisions|detail-plans|detail-jobs)(\/|$)/.test(loc.pathname);return <div className={`shell ${focused?'focused':''}`}>
-  {!focused&&<aside className="sidebar"><div className="brand"><span className="brandmark"><Sparkles/></span><div><b>2D→3D Studio</b><small>本地生产工作台</small></div></div><nav>{nav.map(([to,I,label])=><NavLink key={to} to={to} end={to==='/' }><I/>{label}</NavLink>)}</nav><div className="sidebar-foot"><span className="health-dot"/> 本地环境 · 管理员</div></aside>}
+function LoginPage(){const params=new URLSearchParams(location.search);const returnTo=params.get('return_to')||'/';const target=`/api/auth/login?return_to=${encodeURIComponent(returnTo)}`;useEffect(()=>{location.replace(target)},[target]);return <div className="empty" style={{minHeight:'100vh',justifyContent:'center'}}><Sparkles/><h1>2D→3D Studio</h1><p>正在进入账号密码登录页…</p><a className="button primary" href={target}>没有自动跳转时点这里 <ChevronRight size={16}/></a></div>}
+
+function Shell({user}:{user:AuthUser}){const loc=useLocation(); const focused=/\/(create|validation|plan|jobs|review|refinement|revisions|detail-plans|detail-jobs)(\/|$)/.test(loc.pathname);const logout=async()=>{await api.logout();location.assign('/login')};return <div className={`shell ${focused?'focused':''}`}>
+  {!focused&&<aside className="sidebar"><div className="brand"><span className="brandmark"><Sparkles/></span><div><b>2D→3D Studio</b><small>生产工作台</small></div></div><nav>{nav.filter(([, , ,admin])=>!admin||user.role==='admin').map(([to,I,label])=><NavLink key={to} to={to} end={to==='/' }><I/>{label}</NavLink>)}</nav><div className="sidebar-foot"><span className="health-dot"/> {user.name} · {user.role==='admin'?'管理员':'用户'} <button type="button" onClick={logout} title="退出登录"><LogOut size={15}/></button></div></aside>}
   <section className="workspace"><header className="topbar"><div className="mobile-brand"><Menu/> 2D→3D Studio</div><div className="search"><Search/><span>搜索项目、任务或素材</span><kbd>⌘ K</kbd></div><div className="system-strip"><span><Activity/> 系统 <b>正常</b></span><span><Cpu/> GPU <b>就绪</b></span><span><Gauge/> CPU <b>24%</b></span><span><HardDrive/> 存储 <b>68%</b></span></div></header><Breadcrumbs/><main><Routes>
     <Route path="/" element={<Dashboard/>}/><Route path="/create" element={<CreateProject/>}/><Route path="/validation/:projectId" element={<ValidationPage/>}/><Route path="/plan/:projectId" element={<PlanPage/>}/><Route path="/jobs/:jobId" element={<MonitorPage/>}/><Route path="/review/:projectId" element={<ReviewPage/>}/>
     <Route path="/refinement/new/:versionId" element={<RefinementConfigPage/>}/><Route path="/refinement/jobs/:jobId" element={<RefinementMonitorPage/>}/>
@@ -60,10 +64,10 @@ function Shell(){const loc=useLocation(); const focused=/\/(create|validation|pl
     <Route path="/parts-lab/assembly/:partId" element={<PartsAssemblyPage/>}/>
     <Route path="/parts-lab/compare/:partId" element={<PartsComparePage/>}/>
     <Route path="/parts-lab/*" element={<PartsLabPage/>}/>
-    <Route path="/projects" element={<Dashboard/>}/><Route path="/assets" element={<Placeholder title="素材管理"/>}/><Route path="/queue" element={<Placeholder title="任务队列"/>}/><Route path="/gpu" element={<GpuConsolePage/>}/><Route path="/printer" element={<PrinterConsolePage/>}/><Route path="/print-workflow" element={<PrintWorkflowPage/>}/><Route path="/library" element={<Placeholder title="模型 / 资产库"/>}/><Route path="/settings" element={<Placeholder title="系统设置"/>}/><Route path="*" element={<Navigate to="/"/>}/>
+    <Route path="/projects" element={<Dashboard/>}/><Route path="/assets" element={<Placeholder title="素材管理"/>}/><Route path="/queue" element={<Placeholder title="任务队列"/>}/><Route path="/gpu" element={user.role==='admin'?<GpuConsolePage/>:<Navigate to="/"/>}/><Route path="/printer" element={user.role==='admin'?<PrinterConsolePage/>:<Navigate to="/"/>}/><Route path="/print-workflow" element={<PrintWorkflowPage/>}/><Route path="/library" element={<Placeholder title="模型 / 资产库"/>}/><Route path="/settings" element={user.role==='admin'?<Placeholder title="系统设置"/>:<Navigate to="/"/>}/><Route path="*" element={<Navigate to="/"/>}/>
   </Routes></main></section>
 </div>}
-export default function App(){return <Shell/>}
+export default function App(){const [user,setUser]=useState<AuthUser|null|undefined>(undefined);useEffect(()=>{api.me().then(setUser).catch(()=>setUser(null))},[]);if(location.pathname==='/login')return <LoginPage/>;if(user===undefined)return <div className="empty"><Activity/><p>正在验证登录状态…</p></div>;if(!user){location.replace(`/login?return_to=${encodeURIComponent(location.pathname+location.search)}`);return null}return <Shell user={user}/>}
 
 export function PageHeader({eyebrow,title,description,action}:{eyebrow?:string;title:string;description?:string;action?:React.ReactNode}){return <div className="page-header"><div>{eyebrow&&<span className="eyebrow">{eyebrow}</span>}<h1>{title}</h1>{description&&<p>{description}</p>}</div>{action}</div>}
 export function Button({children,kind='primary',...props}:React.ButtonHTMLAttributes<HTMLButtonElement>&{kind?:'primary'|'secondary'|'danger'|'success'}){return <button className={`button ${kind}`} {...props}>{children}<ChevronRight size={16}/></button>}

@@ -4,5 +4,7 @@ python-multipart==0.0.20
 Pillow==11.3.0
 psutil==7.0.0
 httpx==0.28.1
+Authlib==1.6.12
+itsdangerous==2.2.0
 pytest==8.4.1
 paho-mqtt==2.1.0

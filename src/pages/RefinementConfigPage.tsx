@@ -21,7 +21,7 @@ export default function RefinementConfigPage() {
     [strength, setStrength] = useState("conservative"),
     [uv, setUv] = useState("preserve_or_smart"),
     [texture, setTexture] = useState(2048),
-    [template, setTemplate] = useState("neutral"),
+    [template, setTemplate] = useState("preserve_source"),
     [minTriangles, setMin] = useState(20000),
     [maxTriangles, setMax] = useState(120000),
     [maxMB, setMaxMB] = useState(20),
@@ -53,6 +53,7 @@ export default function RefinementConfigPage() {
         uvStrategy: uv,
         uvIslandMargin: 0.03,
         materialTemplate: template,
+        textureMode: "preserve_source",
         targetTriangleRange: [minTriangles, maxTriangles],
         textureResolution: texture,
         maxWebGlbMB: maxMB,
@@ -144,14 +145,14 @@ export default function RefinementConfigPage() {
             </select>
           </label>
           <label>
-            材质模板
+            材质策略
             <select
               value={template}
               onChange={(e) => setTemplate(e.target.value)}
             >
-              <option value="neutral">中性非金属</option>
-              <option value="matte">哑光</option>
+              <option value="preserve_source">保留源材质（推荐）</option>
             </select>
+            <small>无相机标定时参考图仅用于视觉验收，不会覆盖 Base Color。</small>
           </label>
           <label>
             贴图分辨率

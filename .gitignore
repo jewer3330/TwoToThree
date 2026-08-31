@@ -33,3 +33,7 @@ assessment.json
 detail-inventory.json
 object-sculpt-spec.json
 review-layers.json
+
+# Local tooling state and stray runtime logs
+.codely-cli/
+*.log

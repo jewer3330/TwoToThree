@@ -1416,7 +1416,7 @@ main {
   color: var(--muted);
 }
 .asset-row svg,
-.ok {
+.asset-row .ok {
   color: var(--green);
   width: 18px;
 }

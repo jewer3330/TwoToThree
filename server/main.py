@@ -6,8 +6,9 @@ from typing import Any,Literal
 import psutil
 from fastapi import FastAPI,File,HTTPException,Query,Request,UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse,Response,StreamingResponse
+from fastapi.responses import FileResponse,JSONResponse,Response,StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.sessions import SessionMiddleware
 from PIL import Image,ImageDraw,UnidentifiedImageError
 from pydantic import BaseModel,Field
 from .core import DATA,ROOT,db,dump,init_db,load,now,project_dir,resolve_storage,rowdict,sha256,slugify,storage_path,uid
@@ -18,9 +19,11 @@ from .printpipeline import routes as printpipeline_routes
 from .backends import capabilities,refine_blender,generate_hunyuan,generate_hunyuan_multiview,export_stl_blender,remote_gpu,BackendError,CancelledError
 from .detail_provider import generate as generate_detail_candidate,stop_server as stop_detail_server
 from .style_presets import DEFAULT_STYLE, public_style_presets, style_preset
+from . import auth
 
 @asynccontextmanager
 async def lifespan(_:FastAPI):
+    auth.validate_config()
     from . import transfers
     transfers.init_db()
     init_db();seed_demo();gpu_routes.start_services();printer_routes.start_services()
@@ -37,7 +40,23 @@ async def lifespan(_:FastAPI):
 app=FastAPI(title='2D→3D Studio API',version='1.0.0',docs_url='/api/docs',openapi_url='/api/openapi.json',lifespan=lifespan)
 mimetypes.add_type('model/gltf-binary','.glb')
 _cors=os.environ.get('CORS_ORIGINS','http://localhost:5173,http://127.0.0.1:5173')
-app.add_middleware(CORSMiddleware,allow_origins=[o.strip() for o in _cors.split(',') if o.strip()],allow_methods=['*'],allow_headers=['*'])
+app.add_middleware(CORSMiddleware,allow_origins=[o.strip() for o in _cors.split(',') if o.strip()],allow_credentials=True,allow_methods=['*'],allow_headers=['*'])
+
+@app.middleware('http')
+async def authentication_boundary(request:Request,call_next):
+    if auth.is_public(request.url.path):return await call_next(request)
+    user=auth.session_user(request)
+    if not user:return JSONResponse({'detail':'需要登录','code':'AUTH_REQUIRED'},status_code=401)
+    if auth.requires_admin(request.url.path,request.method) and user.get('role')!='admin':
+        return JSONResponse({'detail':'需要管理员权限','code':'ADMIN_REQUIRED'},status_code=403)
+    request.state.user=user
+    return await call_next(request)
+
+# Starlette executes the last-added middleware first. SessionMiddleware must
+# therefore be registered after the auth boundary so request.session exists.
+app.add_middleware(SessionMiddleware,secret_key=os.environ.get('SESSION_SECRET','development-only-change-me'),max_age=auth.SESSION_MAX_AGE,same_site='lax',https_only=os.environ.get('SESSION_HTTPS_ONLY','true').lower() not in {'0','false','no'})
+
+app.include_router(auth.router)
 app.include_router(gpu_routes.router)
 app.include_router(printer_routes.router)
 app.include_router(printpipeline_routes.router)
@@ -48,7 +67,7 @@ class PatchInput(BaseModel):
     name:str|None=None;subjectType:str|None=None;intendedUse:str|None=None;quality:str|None=None;modelStyle:Literal['realistic','cartoon','chibi']|None=None;visualConditioningMode:Literal['auto','original','contour','rgb_depth']|None=None;segmentationRequired:bool|None=None;rigRequired:bool|None=None;preserveFeatures:str|None=None;notes:str|None=None
 class DecisionInput(BaseModel):notes:str=''
 class RefinementInput(BaseModel):
-    sourceVersionId:str;modules:list[str]=['geometryRepair','uvUnwrap','pbrMaterials','webOptimization','visualReview'];instructions:str='';geometryRepairStrength:str='conservative';uvStrategy:str='preserve_or_smart';uvIslandMargin:float=.03;materialTemplate:str='neutral';targetTriangleRange:list[int]=[20000,120000];textureResolution:int=2048;maxWebGlbMB:int=20;preserveThickness:bool=True;maxThicknessLoss:float=Field(default=.08,ge=0,le=.5);maxDecimationPerPass:float=Field(default=.2,ge=.05,le=.5);minThinAxisRatio:float=Field(default=.08,ge=.01,le=.5)
+    sourceVersionId:str;modules:list[str]=['geometryRepair','uvUnwrap','pbrMaterials','webOptimization','visualReview'];instructions:str='';geometryRepairStrength:str='conservative';uvStrategy:str='preserve_or_smart';uvIslandMargin:float=.03;materialTemplate:str='preserve_source';textureMode:Literal['preserve_source','calibrated_projection']='preserve_source';projectionCalibration:dict|None=None;targetTriangleRange:list[int]=[20000,120000];textureResolution:int=2048;maxWebGlbMB:int=20;preserveThickness:bool=True;maxThicknessLoss:float=Field(default=.08,ge=0,le=.5);maxDecimationPerPass:float=Field(default=.2,ge=.05,le=.5);minThinAxisRatio:float=Field(default=.08,ge=.01,le=.5)
 class PlanInput(BaseModel):
     primaryBackend:str='hunyuan3d';fallbackBackends:list[str]=['sf3d','triposr'];geometryQuality:str='standard';textureResolution:int=0;faceRefinement:bool=False;targetTriangleRange:list[int]=[60000,120000];segmentationRequired:bool=False;rigRequired:bool=False;preserveBaseline:bool=True;renderViews:list[str]=['front','left-three-quarter','side','back'];modelStyle:Literal['realistic','cartoon','chibi']=DEFAULT_STYLE;stylePreset:dict=Field(default_factory=lambda:style_preset(DEFAULT_STYLE));viewWeights:dict[str,float]=Field(default_factory=lambda:{'front':1.8,'side':1.0,'back':0.7});visualConditioning:dict=Field(default_factory=lambda:{'enabled':True,'mode':'auto','depthBlend':.15,'exportExperimentalDepth':True});limitations:list[str]=[];referenceSetId:str|None=None
 class CommentInput(BaseModel):
@@ -188,15 +207,29 @@ def get_project(pid):
     return r
 
 @app.get('/api/system/health')
-def health():
-    disk=psutil.disk_usage(str(ROOT));caps=capabilities();gpu=remote_gpu() if os.environ.get('PRINT3D_MODE')=='remote' else None
+async def health():
+    # Liveness must never depend on GPU2 or SSH: Docker/NPM use this endpoint to
+    # decide whether the API itself is alive. Remote capability probing belongs
+    # to the dedicated diagnostics endpoint and may legitimately take seconds.
+    disk=psutil.disk_usage(str(ROOT));gpu=None
+    if os.environ.get('PRINT3D_MODE')=='remote':
+        gpu={'status':'unverified','name':None}
+        caps={k:False for k in ('hunyuan3d','hunyuan3dMultiview','sf3d','triposr','blender','blenderRefinement','blenderStlExport')}
+    else:
+        caps=capabilities()
     if gpu is None:
         gpu={'status':'unavailable','name':None}
         try:
             import subprocess
             gpu_name=subprocess.check_output(['nvidia-smi','--query-gpu=name','--format=csv,noheader'],text=True,timeout=4,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0)).strip();gpu={'status':'ready' if gpu_name else 'unavailable','name':gpu_name}
         except Exception:pass
-    return {'status':'healthy' if gpu['status']=='ready' and caps['hunyuan3d'] and caps['blender'] else 'degraded','cpu':psutil.cpu_percent(),'memory':psutil.virtual_memory().percent,'storage':disk.percent,'gpu':{'status':gpu['status'],'name':gpu['name'],'queueConcurrency':1},'backends':caps,'services':{'api':'online','database':'online','worker':'local-thread'}}
+    return {'status':'healthy','cpu':psutil.cpu_percent(),'memory':psutil.virtual_memory().percent,'storage':disk.percent,'gpu':{'status':gpu['status'],'name':gpu['name'],'queueConcurrency':1},'backends':caps,'services':{'api':'online','database':'online','worker':'local-thread'}}
+
+@app.get('/api/system/health/deep')
+def health_deep():
+    gpu=remote_gpu() if os.environ.get('PRINT3D_MODE')=='remote' else None
+    return {'status':'healthy' if gpu and gpu['status']=='ready' else 'degraded',
+            'gpu':gpu or {'status':'unavailable','name':None}, 'backends':capabilities()}
 @app.get('/api/style-presets')
 def style_presets():return public_style_presets()
 @app.get('/api/projects')
@@ -763,7 +796,7 @@ def run_revision(rid):
         if not capabilities().get('blenderRefinement'):raise RuntimeError('真实 Blender 自动精修环境未配置')
         root=project_dir(r['project_id'])/'revisions'/rid;root.mkdir(parents=True,exist_ok=True);raw=root/'hunyuan-candidate.glb';seed=int(config.get('seed',random.randint(1,2**31-1)));quality=config.get('quality','standard')
         generate_hunyuan(resolve_storage(asset['storage_path']),raw,seed,quality,log,cancelled)
-        refdir=root/'blender';refdir.mkdir();cfg={'modules':['geometryRepair','uvUnwrap','pbrMaterials','webOptimization','visualReview'],'instructions':'Reference Set candidate post-processing','geometryRepairStrength':'conservative','uvStrategy':'preserve_or_smart','uvIslandMargin':.03,'materialTemplate':'neutral','targetTriangleRange':[20000,120000],'textureResolution':2048,'maxWebGlbMB':20,'preserveThickness':True,'maxThicknessLoss':.08,'maxDecimationPerPass':.2,'minThinAxisRatio':.08};cfg_path=root/'blender-config.json';cfg_path.write_text(json.dumps(cfg,ensure_ascii=False),encoding='utf-8');result=refine_blender(raw,refdir,cfg_path,log,cancelled,resolve_storage(asset['storage_path']))
+        refdir=root/'blender';refdir.mkdir();cfg={'modules':['geometryRepair','uvUnwrap','pbrMaterials','webOptimization','visualReview'],'instructions':'Reference Set candidate post-processing','geometryRepairStrength':'conservative','uvStrategy':'preserve_or_smart','uvIslandMargin':.03,'materialTemplate':'preserve_source','textureMode':'preserve_source','projectionCalibration':None,'targetTriangleRange':[20000,120000],'textureResolution':2048,'maxWebGlbMB':20,'preserveThickness':True,'maxThicknessLoss':.08,'maxDecimationPerPass':.2,'minThinAxisRatio':.08};cfg_path=root/'blender-config.json';cfg_path.write_text(json.dumps(cfg,ensure_ascii=False),encoding='utf-8');result=refine_blender(raw,refdir,cfg_path,log,cancelled,resolve_storage(asset['storage_path']))
         out=uid('ver');stamp=now();status='awaiting_review' if result.get('status')=='passed' else 'quality_failed'
         with db() as con:
             con.execute('INSERT INTO versions VALUES(?,?,?,?,?,?,?)',(out,r['project_id'],number,f'v{number:03d} · Reference Set 候选重生成','ready_for_review' if status=='awaiting_review' else 'quality_failed',dump(result),stamp))

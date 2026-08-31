@@ -8,6 +8,8 @@ def args():
     raw=sys.argv[sys.argv.index('--')+1:] if '--' in sys.argv else []
     p=argparse.ArgumentParser();p.add_argument('--input',type=Path,required=True);p.add_argument('--output-dir',type=Path,required=True);p.add_argument('--web-glb',type=Path,required=True)
     p.add_argument('--quality',choices=('standard','high','ultra'),default='standard');p.add_argument('--texture-resolution',type=int,default=0);p.add_argument('--style',choices=('realistic','cartoon','chibi'),default='realistic');p.add_argument('--depth-scale',type=float,default=1.0)
+    p.add_argument('--texture-mode',choices=('preserve_source','calibrated_projection'),default='preserve_source')
+    p.add_argument('--projection-calibration',type=Path)
     p.add_argument('--front',type=Path);p.add_argument('--side',type=Path);p.add_argument('--back',type=Path);return p.parse_args(raw)
 
 def look(camera,target):camera.rotation_euler=(target-camera.location).to_track_quat('-Z','Y').to_euler()
@@ -57,7 +59,8 @@ def main():
     if not meshes:raise RuntimeError('GLB contains no mesh objects')
     points=[o.matrix_world@Vector(c) for o in meshes for c in o.bound_box];lo=Vector(tuple(min(p[i] for p in points) for i in range(3)));hi=Vector(tuple(max(p[i] for p in points) for i in range(3)));dims=hi-lo
     texture_outputs=[];refs={'front':a.front,'side':a.side,'back':a.back}
-    if a.quality!='standard' and a.texture_resolution:
+    calibration_ok=bool(a.projection_calibration and a.projection_calibration.exists())
+    if a.texture_mode=='calibrated_projection' and calibration_ok and a.texture_resolution:
         texture_outputs=apply_projected_color(meshes,lo,hi,refs,a.texture_resolution,a.quality=='ultra',a.output_dir/'textures')
     scale=4.0/max(dims.z,dims.y,dims.x,1e-5);center=(lo+hi)/2
     root=bpy.data.objects.new('NormalizedRoot',None);bpy.context.collection.objects.link(root)
@@ -73,6 +76,6 @@ def main():
     bpy.ops.object.camera_add();cam=bpy.context.object;scene.camera=cam;cam.data.lens=60;target=Vector((0,0,2))
     views={'front':(0,-8,2.3),'left-three-quarter':(-5.6,-5.6,2.7),'side':(-8,0,2.3),'back':(0,8,2.3)}
     for name,pos in views.items():cam.location=pos;look(cam,target);scene.render.filepath=str(a.output_dir/f'{name}.png');bpy.ops.render.render(write_still=True)
-    stats={'schemaVersion':2,'status':'passed','quality':a.quality,'modelStyle':a.style,'depthScale':depth_scale,'geometryResolution':{'standard':256,'high':384,'ultra':512}[a.quality],'textureResolution':a.texture_resolution or None,'faceRefinement':a.quality=='ultra','input':str(a.input),'webGlb':str(a.web_glb),'objects':len(meshes),'vertices':sum(len(o.data.vertices) for o in meshes),'polygons':sum(len(o.data.polygons) for o in meshes),'textures':[str(p) for p in texture_outputs],'renders':list(views)}
+    stats={'schemaVersion':3,'status':'passed','quality':a.quality,'modelStyle':a.style,'depthScale':depth_scale,'geometryResolution':{'standard':256,'high':384,'ultra':512}[a.quality],'textureResolution':a.texture_resolution or None,'faceRefinement':False,'input':str(a.input),'webGlb':str(a.web_glb),'objects':len(meshes),'vertices':sum(len(o.data.vertices) for o in meshes),'polygons':sum(len(o.data.polygons) for o in meshes),'textures':[str(p) for p in texture_outputs],'textureMode':a.texture_mode,'sourceMaterialsPreserved':a.texture_mode=='preserve_source','projectionApplied':bool(texture_outputs),'projectionCalibration':str(a.projection_calibration) if calibration_ok else None,'warnings':(['参考图仅用于视觉验收，未执行未标定投射'] if refs.get('front') and not texture_outputs else []),'renders':list(views)}
     (a.output_dir/'blender-report.json').write_text(json.dumps(stats,ensure_ascii=False,indent=2),encoding='utf-8');print('STUDIO_REPORT='+json.dumps(stats,ensure_ascii=False))
 if __name__=='__main__':main()

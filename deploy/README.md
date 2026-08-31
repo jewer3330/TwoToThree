@@ -10,7 +10,7 @@ Mac mini (主控)                          GPU-1 / GPU-2 / ...（算力节点）
 │  GPU 控制台 /api/gpu/*  │             │   ├─ local\Blender52      │
 │  主机注册表 gpu_hosts   │             │   ├─ local\hunyuan-...    │
 │  健康探测 + 队列调度    │             │   ├─ local\Hunyuan3D-2.1  │
-│  CDN 只读挂载           │             │   └─ TwoToThree\(仓库)    │
+│  OIDC 登录 + 本地数据卷 │             │   └─ TwoToThree\(仓库)    │
 └─────────────────────────┘             └──────────────────────────┘
 ```
 
@@ -19,10 +19,12 @@ Mac mini (主控)                          GPU-1 / GPU-2 / ...（算力节点）
 ```bash
 cd deploy/control-plane
 ./deploy.sh --host 100.69.5.47 --user d0993 --rebuild   # 首次加 --rebuild
-# 打开 http://127.0.0.1:8000/gpu  → GPU 控制台
+# 配置 Authentik OIDC 后打开 https://studio.example.com/gpu
 ```
 
 依赖：Docker Desktop、`/Volumes/ssd/servers/print3d_server` 目录（含 `keys/` SSH 私钥、`data/` 数据卷）、compose 需在 `love-net` 网络。
+
+登录部署见 [`deploy/authentik/README.md`](authentik/README.md)。生产环境缺少 OIDC 或 Session 密钥时服务会拒绝启动。
 
 ## 2. 部署 GPU 节点（Windows）
 
@@ -63,7 +65,5 @@ cd deploy/control-plane
 docker logs -f print3d-server          # 日志
 docker compose up -d --build           # 更新（deploy.sh --rebuild）
 cat /Volumes/ssd/servers/print3d_server/data/gpu_hosts.json   # 主机配置
-curl http://127.0.0.1:8000/api/gpu/overview                   # 集群汇总
-curl http://127.0.0.1:8000/api/gpu/queue                      # 队列
-curl -X POST http://127.0.0.1:8000/api/gpu/hosts/<id>/probe   # 手动探测
+# GPU 管理 API 需要已登录的管理员 Session；不要再匿名 curl 管理接口。
 ```

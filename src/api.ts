@@ -19,12 +19,17 @@ import type {
 } from "./types";
 const json = async <T>(r: Response): Promise<T> => {
   if (!r.ok) {
+    if (r.status === 401 && !location.pathname.startsWith('/login')) {
+      location.assign(`/login?return_to=${encodeURIComponent(location.pathname + location.search)}`);
+    }
     const body = await r.json().catch(() => ({ detail: r.statusText }));
     throw new Error(body.detail || body.error?.message || r.statusText);
   }
   return r.json();
 };
 export const api = {
+  me: () => fetch('/api/auth/me').then(json<AuthUser>),
+  logout: () => fetch('/api/auth/logout', {method:'POST'}).then(json<{ok:boolean}>),
   health: () => fetch("/api/system/health").then(json),
   stylePresets: () => fetch("/api/style-presets").then(json<StylePreset[]>),
   projects: (query = "") =>
@@ -60,6 +65,7 @@ export const api = {
         "POST",
         `/api/projects/${id}/assets?role=${encodeURIComponent(role)}`,
       );
+      x.withCredentials = true;
       x.upload.onprogress = (e) =>
         e.lengthComputable &&
         onProgress?.(Math.round((e.loaded / e.total) * 100));
@@ -311,4 +317,9 @@ export const api = {
   printJobSplit: (id: string, body: unknown) => fetch(`/api/print/jobs/${id}/split`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }).then(json<Record<string, unknown>>),
   printJobColor: (id: string, assignments: Record<string,string>) => fetch(`/api/print/jobs/${id}/color`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ assignments }) }).then(json<Record<string, unknown>>),
   printJobDelete: (id: string) => fetch(`/api/print/jobs/${id}`, { method: "DELETE" }),
+  printJobExport3mf: (id: string) => fetch(`/api/print/jobs/${id}/export3mf`, { method: "POST" }).then(json<Record<string, unknown>>),
+  printJobSend: (id: string, body: unknown) => fetch(`/api/print/jobs/${id}/send`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }).then(json<Record<string, unknown>>),
+  printerPrint: (id: string, body: unknown) => fetch(`/api/print/printers/${id}/print`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }).then(json<Record<string, unknown>>),
 };
+
+export type AuthUser={authenticated:true;sub:string;name:string;email:string;role:'admin'|'user';groups:string[]};
