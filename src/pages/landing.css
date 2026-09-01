@@ -22,6 +22,11 @@
     var(--cream);
   overflow-x: hidden;
 }
+/* 落地页为移动端自适应页面：解除后台全局样式 body{min-width:960px} 的约束 */
+body:has(.landing) {
+  min-width: 0;
+  background: var(--cream);
+}
 .landing * { box-sizing: border-box; }
 .landing button, .landing a { font: inherit; }
 .landing a { color: inherit; text-decoration: none; }
