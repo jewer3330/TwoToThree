@@ -2,6 +2,8 @@
 
 面向 Windows 工作站与局域网的单用户 2D→3D 生产工作台。实现了设计文档规定的六个核心页面、FastAPI/SQLite、本地文件版本、素材技术检查、不可变任务配置、单任务 Worker、SSE 事件、GLB 完整性检查、四视图产物、真实 Three.js 预览和人工验收闭环。
 
+未登录首页为**温暖治愈风落地页**（奶油米色 + 樱花粉，参考「春日慢递」风格，含花瓣飘落、工坊清单勾选、拆信申请等交互），视觉参考与原始实现见 `design/sakura-bunny-site/`，落地页实现见 `src/pages/LandingPage.tsx`。
+
 支持**分布式 GPU 集群**：主控（Mac mini / Linux，Docker）统一调度，任意数量 Windows GPU 节点通过 SSH 提供算力。新增一台机器只需注册一条配置（详见 `deploy/README.md`）。
 
 ## 快速启动
@@ -40,7 +42,7 @@ cd deploy/control-plane
 # 控制台: http://127.0.0.1:8000/gpu
 ```
 
-## 分布式 GPU 集群
+### 集群架构
 
 ```
 主控（Docker print3d-server:8000）               GPU-1 / GPU-2 / ...（算力节点，Windows）
@@ -112,7 +114,7 @@ npm run build
 - `pipeline/blender_split_connected.py`：连通体拆分脚本（分模块打印）
 - `%USERPROFILE%\AIData\3d\data\projects\<project-id>\versions\<version-id>\`：隔离的配置、模型、渲染、报告和日志
 - `tests/`：上传安全与端到端任务契约测试
-- `design/`：原始产品与实施规范
+- `design/`：原始产品与实施规范，含落地页视觉参考 `design/sakura-bunny-site/`（「春日慢递·兔兔邮局」风格示例）
 
 ## 安全与可追踪性
 
