@@ -29,10 +29,11 @@ except ImportError:
 
 def _env(name:str,default:str='')->str:
     v=os.environ.get(name)
-    return v if v not in (None,'') else default
+    # Windows 环境变量极易带尾随空格（cmd `set VAR=value && ...`），必须 strip
+    return v.strip() if v not in (None,'') else default
 
 
-CONTROL_URL=_env('CONTROL_URL').rstrip('/')
+CONTROL_URL=_env('CONTROL_URL').strip().rstrip('/')
 WORKER_TOKEN=_env('WORKER_TOKEN')
 AGENT_NAME=_env('AGENT_NAME',socket.gethostname())
 AGENT_ID=_env('AGENT_ID',f'agent-{socket.gethostname()}')

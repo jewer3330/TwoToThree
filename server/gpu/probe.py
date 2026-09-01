@@ -39,6 +39,9 @@ class ProbeThread(threading.Thread):
         hosts_list=hosts.list_hosts()
         for h in hosts_list:
             if not h.get('enabled'):continue
+            # 自注册节点走 WebSocket 心跳（selfreg.py），不适用 SSH 探测；
+            # 探测会把 online/caps 覆盖成 offline/空，破坏调度器的能力匹配。
+            if h.get('provider')=='selfreg':continue
             s=h.get('status',{})
             if h['id'] in hosts.pending_probes() or not s.get('lastProbeAt') or (now-int(s.get('_tick',0)))>=self.interval:
                 _ProbeWorker(h).start()
