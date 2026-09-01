@@ -74,12 +74,36 @@ def _disk_free()->float|None:
 
 
 def _capabilities()->dict:
+    """本机能力检测（OS 感知，基于 studio_paths 布局）。
+
+    不能直接复用 backends.capabilities()：它在 local 模式硬编码 Windows 路径，
+    在 Linux 节点（AutoDL 等）会全部误报 False。这里按当前 OS 探测实际路径。
+    """
     caps={}
     try:
-        from .backends import capabilities
-        caps=capabilities()
+        from studio_paths import LOCAL_ROOT
+        win=os.name=='nt'
+        py=LOCAL_ROOT/'hunyuan-bootstrap'/('Scripts' if win else 'bin')/('python.exe' if win else 'python')
+        blender=LOCAL_ROOT/('Blender52' if win else 'blender')/('blender.exe' if win else 'blender')
+        model=LOCAL_ROOT/'Hunyuan3D-2.1-model'
+        mv_model=LOCAL_ROOT/'Hunyuan3D-2mv-model-v2'
+        repo=Path(__file__).resolve().parents[1]
+        runner=repo/'pipeline'/'run_hunyuan_yoyo.py'
+        mv_runner=repo/'pipeline'/'run_hunyuan_multiview.py'
+        renderer=repo/'pipeline'/'blender_render_job.py'
+        refiner=repo/'pipeline'/'blender_auto_refine.py'
+        stl=repo/'pipeline'/'blender_export_stl.py'
+        caps={
+            'hunyuan3d':py.exists() and runner.exists() and (model/'hunyuan3d-dit-v2-1'/'model.fp16.ckpt').exists(),
+            'hunyuan3dMultiview':py.exists() and mv_runner.exists() and (mv_model/'hunyuan3d-dit-v2-mv'/'model.fp16.safetensors').exists(),
+            'sf3d':False,
+            'triposr':False,
+            'blender':blender.exists() and renderer.exists(),
+            'blenderRefinement':blender.exists() and refiner.exists(),
+            'blenderStlExport':blender.exists() and stl.exists(),
+        }
     except Exception:
-        caps={}
+        caps={k:False for k in ('hunyuan3d','hunyuan3dMultiview','sf3d','triposr','blender','blenderRefinement','blenderStlExport')}
     if AGENT_CAPS_OVERRIDE:
         for name in AGENT_CAPS_OVERRIDE.split(','):
             name=name.strip()
