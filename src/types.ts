@@ -17,6 +17,7 @@ export type ProjectStatus =
   | "revision_requested"
   | "completed"
   | "completed_with_notes"
+  | "transfer_pending"
   | "failed"
   | "cancelled";
 export interface GpuHost {
@@ -28,6 +29,9 @@ export interface GpuHost {
   root: string;
   ext: string;
   work: string;
+  os: string;
+  port: number;
+  password: string;
   labels: string[];
   maxConcurrentJobs: number;
   enabled: boolean;

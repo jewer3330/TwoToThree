@@ -10,10 +10,12 @@ router=APIRouter(prefix='/api/gpu',tags=['gpu'])
 
 class HostInput(BaseModel):
     name:str|None=None;host:str=Field(min_length=3);user:str='d0993';key:str='';root:str='';ext:str='';work:str=''
+    os:str='windows';port:int=22;password:str=''
     labels:list[str]=[];maxConcurrentJobs:int=1;enabled:bool=True
     provider:str='ssh';instanceUuid:str='';token:str='';transfer:str|None=None
 class HostPatch(BaseModel):
     name:str|None=None;user:str|None=None;key:str|None=None;root:str|None=None;ext:str|None=None;work:str|None=None
+    os:str|None=None;port:int|None=None;password:str|None=None
     labels:list[str]|None=None;maxConcurrentJobs:int|None=None;enabled:bool|None=None
     provider:str|None=None;instanceUuid:str|None=None;token:str|None=None;transfer:str|None=None
 

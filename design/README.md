@@ -16,3 +16,4 @@
 - `2D_TO_3D_STUDIO_IMPLEMENTATION_SPEC.md` — 产品、页面和总体技术规范
 - `LOCAL_AI_REFERENCE_EDIT_ARCHITECTURE.md` — 评论驱动的本地 AI 修订参考图架构
 - `AI_DETAIL_AUGMENTATION_IMPLEMENTATION_PLAN.md` — 上传后 AI 细节补充功能的分阶段落地计划
+- `PRODUCTION_UPGRADE_MASTER_PLAN.md` — GPU2 原生 IPv6 直传、整任务驻留、纹理修正、打印闭环与最小访问控制总规划

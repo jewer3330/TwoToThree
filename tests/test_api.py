@@ -32,6 +32,7 @@ def test_project_validation_and_job_contract(monkeypatch,tmp_path):
     import server.worker as worker
     import server.main as main
     sample=worker.ROOT/'public/models/yoyo-sf3d.glb'
+    if not sample.exists():pytest.skip('API contract fixture public/models/yoyo-sf3d.glb is not present in this checkout')
     def fake_generate(image,output,seed,quality,log,cancelled):
         output.parent.mkdir(parents=True,exist_ok=True);shutil.copy2(sample,output);return {'backend':'hunyuan3d','modelVersion':'test'}
     def fake_render(source,output_dir,web_glb,log,cancelled,*args,**kwargs):

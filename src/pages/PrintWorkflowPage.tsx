@@ -5,7 +5,7 @@ import type {Printer} from '../types';
 import {PageHeader} from '../App';
 
 interface PrintPart { index:number; name:string; stl:string; preview:string; dims:number[]; volume:number }
-interface PrintJob { id:string; name:string; status:string; step:string; modelUrl:string|null; modelFile?:string; split:{status:string;parts:PrintPart[];partCount?:number;error?:string;maxParts?:number}; color:{palette:Array<{id:string;name:string;hex:string}>;assignments:Record<string,string>} }
+interface PrintJob { id:string; name:string; status:string; step:string; modelUrl:string|null; modelFile?:string; split:{status:string;parts:PrintPart[];partCount?:number;error?:string;maxParts?:number}; color:{palette:Array<{id:string;name:string;hex:string}>;assignments:Record<string,string>;preview3mf?:string} }
 
 const PALETTE=[['白','#FFFFFF'],['黑','#1F1F1F'],['红','#E53935'],['橙','#FB8C00'],['黄','#FDD835'],['绿','#43A047'],['蓝','#1E88E5'],['紫','#8E24AA'],['粉','#EC407A'],['青','#00ACC1'],['棕','#6D4C41'],['灰','#9E9E9E']];
 
@@ -17,6 +17,9 @@ export default function PrintWorkflowPage(){
   const [name,setName]=useState('打印任务');
   const [drag,setDrag]=useState(false);
   const [maxParts,setMaxParts]=useState(12);
+  const [selPrinter,setSelPrinter]=useState('');
+  const [startPrint,setStartPrint]=useState(false);
+  const [sendResult,setSendResult]=useState('');
 
   const refresh=useCallback(async()=>{try{const [j,p]=await Promise.all([api.printJobs(),api.printers()]);setJobs(j as unknown as PrintJob[]);setPrinters(p);}catch(e){console.error(e);}},[ ]);
   useEffect(()=>{refresh();},[refresh]);
@@ -27,6 +30,8 @@ export default function PrintWorkflowPage(){
   const upload=async(f:File)=>{if(!job)return;setBusy(true);try{const j=await api.printJobUploadModel(job.id,f);setJob(j as unknown as PrintJob);}catch(e){alert(String(e));}finally{setBusy(false);}};
   const doSplit=async()=>{if(!job)return;setBusy(true);try{const j=await api.printJobSplit(job.id,{maxParts});setJob(j as unknown as PrintJob);}catch(e){alert(String(e));}finally{setBusy(false);}};
   const doColor=async()=>{if(!job)return;setBusy(true);try{const j=await api.printJobColor(job.id,job.color.assignments);setJob(j as unknown as PrintJob);}catch(e){alert(String(e));}finally{setBusy(false);}};
+  const doExport=async()=>{if(!job)return;setBusy(true);setSendResult('');try{const j=await api.printJobExport3mf(job.id);setJob({...job,color:{...job.color,preview3mf:(j as any).url,preview3mfHash:(j as any).hash},step:'send'} as PrintJob);setSendResult(`3MF 导出成功 (${((j as any).size/1048576).toFixed(1)} MB)`);}catch(e){alert(String(e));}finally{setBusy(false);}};
+  const doSend=async()=>{if(!job)return;setBusy(true);setSendResult('');try{const r=await api.printJobSend(job.id,{printerId:selPrinter,startPrint});const rj=r as any;setSendResult(`上传成功: ${rj.uploaded} (${(rj.size/1048576).toFixed(1)} MB)`+(rj.printCommand?`\n打印命令: ${JSON.stringify(rj.printCommand)}`:''));}catch(e){alert(`发送失败：${(e as Error).message}`);}finally{setBusy(false);}};
   const del=async(id:string)=>{if(!confirm('删除该打印任务？'))return;setBusy(true);try{await api.printJobDelete(id);if(job?.id===id)setJob(null);await refresh();}catch(e){alert(String(e));}finally{setBusy(false);}};
 
   const pickColor=(stlName:string,hex:string)=>{if(!job)return;const a={...job.color.assignments,[stlName]:hex};setJob({...job,color:{...job.color,assignments:a}});};
@@ -73,6 +78,21 @@ export default function PrintWorkflowPage(){
               </div>
               <div className="wf-footer"><button className="button primary" onClick={doColor} disabled={busy}><ChevronRight size={16}/>完成上色（保存）</button></div>
             </>}
+            {job.color?.preview3mf&&<div className="wf-send">
+              <h4>④ 发送打印</h4>
+              <div className="wf-send-row">
+                <a className="button secondary" href={job.color.preview3mf} download>下载多色 3MF</a>
+                <select className="printer-select" value={selPrinter} onChange={e=>setSelPrinter(e.target.value)}>
+                  <option value="">选择打印机…</option>
+                  {printers.filter(p=>p.enabled).map(p=><option key={p.id} value={p.id}>{p.name} ({p.ip})</option>)}
+                </select>
+                <button className="button secondary" onClick={doExport} disabled={busy||!job.color.preview3mf}><RefreshCw size={14}/>重新导出 3MF</button>
+                <button className="button primary" onClick={doSend} disabled={busy||!selPrinter}><PrinterIcon size={14}/>上传到打印机</button>
+                <label className="start-print"><input type="checkbox" checked={startPrint} onChange={e=>setStartPrint(e.target.checked)}/>上传后直接发送打印</label>
+              </div>
+              {sendResult&&<pre className="wf-send-result">{sendResult}</pre>}
+              <p className="muted note">说明：多色 3MF 需经 Bambu Studio/OrcaSlicer 切片后才可打印；「上传到打印机」将 3MF 传到打印机（FTP），可稍后在打印机屏幕选择打印，或勾选「直接发送打印」（需已切片文件）。</p>
+            </div>}
           </>}
         </>}
       </section>

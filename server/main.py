@@ -6,8 +6,9 @@ from typing import Any,Literal
 import psutil
 from fastapi import FastAPI,File,HTTPException,Query,Request,UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse,Response,StreamingResponse
+from fastapi.responses import FileResponse,JSONResponse,Response,StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.sessions import SessionMiddleware
 from PIL import Image,ImageDraw,UnidentifiedImageError
 from pydantic import BaseModel,Field
 from .core import DATA,ROOT,db,dump,init_db,load,now,project_dir,resolve_storage,rowdict,sha256,slugify,storage_path,uid
@@ -18,18 +19,51 @@ from .printpipeline import routes as printpipeline_routes
 from .backends import capabilities,refine_blender,generate_hunyuan,generate_hunyuan_multiview,export_stl_blender,remote_gpu,BackendError,CancelledError
 from .detail_provider import generate as generate_detail_candidate,stop_server as stop_detail_server
 from .style_presets import DEFAULT_STYLE, public_style_presets, style_preset
+from . import auth
+from . import autodl
+from . import oss
 
 @asynccontextmanager
 async def lifespan(_:FastAPI):
-    init_db();seed_demo();gpu_routes.start_services();printer_routes.start_services();yield
+    auth.validate_config()
+    await auth.prefetch_metadata()
+    from . import transfers
+    transfers.init_db()
+    init_db();seed_demo();gpu_routes.start_services();printer_routes.start_services()
+    # P0：GPU 产物保留 48h 定时清理（仅清理主控本地残留与过期 pending 状态）
+    import threading as _th
+    def _cleanup_loop():
+        while True:
+            try:transfers.cleanup_expired()
+            except Exception:pass
+            import time as _t;_t.sleep(3600)
+    _th.Thread(target=_cleanup_loop,daemon=True,name='transfer-cleanup').start()
+    yield
 
 app=FastAPI(title='2D→3D Studio API',version='1.0.0',docs_url='/api/docs',openapi_url='/api/openapi.json',lifespan=lifespan)
 mimetypes.add_type('model/gltf-binary','.glb')
 _cors=os.environ.get('CORS_ORIGINS','http://localhost:5173,http://127.0.0.1:5173')
-app.add_middleware(CORSMiddleware,allow_origins=[o.strip() for o in _cors.split(',') if o.strip()],allow_methods=['*'],allow_headers=['*'])
+app.add_middleware(CORSMiddleware,allow_origins=[o.strip() for o in _cors.split(',') if o.strip()],allow_credentials=True,allow_methods=['*'],allow_headers=['*'])
+
+@app.middleware('http')
+async def authentication_boundary(request:Request,call_next):
+    if auth.is_public(request.url.path):return await call_next(request)
+    user=auth.session_user(request)
+    if not user:return JSONResponse({'detail':'需要登录','code':'AUTH_REQUIRED'},status_code=401)
+    if auth.requires_admin(request.url.path,request.method) and user.get('role')!='admin':
+        return JSONResponse({'detail':'需要管理员权限','code':'ADMIN_REQUIRED'},status_code=403)
+    request.state.user=user
+    return await call_next(request)
+
+# Starlette executes the last-added middleware first. SessionMiddleware must
+# therefore be registered after the auth boundary so request.session exists.
+app.add_middleware(SessionMiddleware,secret_key=os.environ.get('SESSION_SECRET','development-only-change-me'),max_age=auth.SESSION_MAX_AGE,same_site='lax',https_only=os.environ.get('SESSION_HTTPS_ONLY','true').lower() not in {'0','false','no'})
+
+app.include_router(auth.router)
 app.include_router(gpu_routes.router)
 app.include_router(printer_routes.router)
 app.include_router(printpipeline_routes.router)
+app.include_router(autodl.router)
 
 class ProjectInput(BaseModel):
     name:str=Field(min_length=1,max_length=60);subjectType:str='character';intendedUse:str='web';quality:str='standard';modelStyle:Literal['realistic','cartoon','chibi']=DEFAULT_STYLE;visualConditioningMode:Literal['auto','original','contour','rgb_depth']='auto';segmentationRequired:bool=False;rigRequired:bool=False;preserveFeatures:str='';notes:str=''
@@ -37,7 +71,7 @@ class PatchInput(BaseModel):
     name:str|None=None;subjectType:str|None=None;intendedUse:str|None=None;quality:str|None=None;modelStyle:Literal['realistic','cartoon','chibi']|None=None;visualConditioningMode:Literal['auto','original','contour','rgb_depth']|None=None;segmentationRequired:bool|None=None;rigRequired:bool|None=None;preserveFeatures:str|None=None;notes:str|None=None
 class DecisionInput(BaseModel):notes:str=''
 class RefinementInput(BaseModel):
-    sourceVersionId:str;modules:list[str]=['geometryRepair','uvUnwrap','pbrMaterials','webOptimization','visualReview'];instructions:str='';geometryRepairStrength:str='conservative';uvStrategy:str='preserve_or_smart';uvIslandMargin:float=.03;materialTemplate:str='neutral';targetTriangleRange:list[int]=[20000,120000];textureResolution:int=2048;maxWebGlbMB:int=20;preserveThickness:bool=True;maxThicknessLoss:float=Field(default=.08,ge=0,le=.5);maxDecimationPerPass:float=Field(default=.2,ge=.05,le=.5);minThinAxisRatio:float=Field(default=.08,ge=.01,le=.5)
+    sourceVersionId:str;modules:list[str]=['geometryRepair','uvUnwrap','pbrMaterials','webOptimization','visualReview'];instructions:str='';geometryRepairStrength:str='conservative';uvStrategy:str='preserve_or_smart';uvIslandMargin:float=.03;materialTemplate:str='preserve_source';textureMode:Literal['preserve_source','calibrated_projection']='preserve_source';projectionCalibration:dict|None=None;targetTriangleRange:list[int]=[20000,120000];textureResolution:int=2048;maxWebGlbMB:int=20;preserveThickness:bool=True;maxThicknessLoss:float=Field(default=.08,ge=0,le=.5);maxDecimationPerPass:float=Field(default=.2,ge=.05,le=.5);minThinAxisRatio:float=Field(default=.08,ge=.01,le=.5)
 class PlanInput(BaseModel):
     primaryBackend:str='hunyuan3d';fallbackBackends:list[str]=['sf3d','triposr'];geometryQuality:str='standard';textureResolution:int=0;faceRefinement:bool=False;targetTriangleRange:list[int]=[60000,120000];segmentationRequired:bool=False;rigRequired:bool=False;preserveBaseline:bool=True;renderViews:list[str]=['front','left-three-quarter','side','back'];modelStyle:Literal['realistic','cartoon','chibi']=DEFAULT_STYLE;stylePreset:dict=Field(default_factory=lambda:style_preset(DEFAULT_STYLE));viewWeights:dict[str,float]=Field(default_factory=lambda:{'front':1.8,'side':1.0,'back':0.7});visualConditioning:dict=Field(default_factory=lambda:{'enabled':True,'mode':'auto','depthBlend':.15,'exportExperimentalDepth':True});limitations:list[str]=[];referenceSetId:str|None=None
 class CommentInput(BaseModel):
@@ -176,16 +210,46 @@ def get_project(pid):
     if not r:raise HTTPException(404,'项目不存在')
     return r
 
+@app.get('/api/system/storage')
+def storage_status():
+    """存储与算力配置状态（仅管理员；不返回任何凭据）。"""
+    return {
+        'oss': {
+            'configured': oss.configured(),
+            'bucket': oss.OSS_BUCKET,
+            'endpoint': oss.OSS_ENDPOINT,
+            'publicEndpoint': oss._host(),
+        },
+        'autodl': {
+            'configured': autodl.configured(),
+            'apiBase': autodl.AUTODL_API_BASE,
+        },
+    }
+
 @app.get('/api/system/health')
-def health():
-    disk=psutil.disk_usage(str(ROOT));caps=capabilities();gpu=remote_gpu() if os.environ.get('PRINT3D_MODE')=='remote' else None
+async def health():
+    # Liveness must never depend on GPU2 or SSH: Docker/NPM use this endpoint to
+    # decide whether the API itself is alive. Remote capability probing belongs
+    # to the dedicated diagnostics endpoint and may legitimately take seconds.
+    disk=psutil.disk_usage(str(ROOT));gpu=None
+    if os.environ.get('PRINT3D_MODE')=='remote':
+        gpu={'status':'unverified','name':None}
+        caps={k:False for k in ('hunyuan3d','hunyuan3dMultiview','sf3d','triposr','blender','blenderRefinement','blenderStlExport')}
+    else:
+        caps=capabilities()
     if gpu is None:
         gpu={'status':'unavailable','name':None}
         try:
             import subprocess
             gpu_name=subprocess.check_output(['nvidia-smi','--query-gpu=name','--format=csv,noheader'],text=True,timeout=4,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0)).strip();gpu={'status':'ready' if gpu_name else 'unavailable','name':gpu_name}
         except Exception:pass
-    return {'status':'healthy' if gpu['status']=='ready' and caps['hunyuan3d'] and caps['blender'] else 'degraded','cpu':psutil.cpu_percent(),'memory':psutil.virtual_memory().percent,'storage':disk.percent,'gpu':{'status':gpu['status'],'name':gpu['name'],'queueConcurrency':1},'backends':caps,'services':{'api':'online','database':'online','worker':'local-thread'}}
+    return {'status':'healthy','cpu':psutil.cpu_percent(),'memory':psutil.virtual_memory().percent,'storage':disk.percent,'gpu':{'status':gpu['status'],'name':gpu['name'],'queueConcurrency':1},'backends':caps,'services':{'api':'online','database':'online','worker':'local-thread'}}
+
+@app.get('/api/system/health/deep')
+def health_deep():
+    gpu=remote_gpu() if os.environ.get('PRINT3D_MODE')=='remote' else None
+    return {'status':'healthy' if gpu and gpu['status']=='ready' else 'degraded',
+            'gpu':gpu or {'status':'unavailable','name':None}, 'backends':capabilities()}
 @app.get('/api/style-presets')
 def style_presets():return public_style_presets()
 @app.get('/api/projects')
@@ -380,7 +444,29 @@ def cancel(jid:str):
 def retry(jid:str):
     old=job_json(jid)
     with db() as con:r=con.execute('SELECT config_snapshot FROM jobs WHERE id=?',(jid,)).fetchone()
+    # P0：transfer_pending 直接进入 resume（续传不重跑推理）
+    if old['status']=='transfer_pending':
+        return resume_transfer(jid)
     return new_job(old['projectId'],load(r['config_snapshot'],{}),old['attempt']+1)
+
+@app.post('/api/jobs/{jid}/resume')
+def resume_transfer(jid:str):
+    """恢复 pending 传输：只重传产物并校验（mark_verified），不重跑推理；成功则继续任务。"""
+    from .transfers import resume_pending
+    snapshot=job_json(jid)
+    if snapshot['status']!='transfer_pending':
+        raise HTTPException(409,'任务不在 transfer_pending 状态，无法续传')
+    resumed,failed=resume_pending(jid)
+    if failed:
+        with db() as con:
+            con.execute("UPDATE jobs SET status='transfer_pending',error_code='TRANSFER_FAILED',error_summary=? WHERE id=?",
+                        (f'续传失败 {failed} 项，GPU 产物仍保留',jid))
+        raise HTTPException(502,f'续传失败（{failed} 项），GPU 产物仍保留')
+    # 全部续传成功（进入 verified）→ 继续任务执行（跳过已完成 stage；产物注册后 commit）
+    with db() as con:con.execute("UPDATE jobs SET status='queued',error_code=NULL,error_summary=NULL WHERE id=?",(jid,))
+    from .worker import launch
+    launch(jid)
+    return job_json(jid)
 @app.post('/api/jobs/{jid}/confirm-geometry')
 def confirm_geometry(jid:str):
     snapshot=job_json(jid)
@@ -730,7 +816,7 @@ def run_revision(rid):
         if not capabilities().get('blenderRefinement'):raise RuntimeError('真实 Blender 自动精修环境未配置')
         root=project_dir(r['project_id'])/'revisions'/rid;root.mkdir(parents=True,exist_ok=True);raw=root/'hunyuan-candidate.glb';seed=int(config.get('seed',random.randint(1,2**31-1)));quality=config.get('quality','standard')
         generate_hunyuan(resolve_storage(asset['storage_path']),raw,seed,quality,log,cancelled)
-        refdir=root/'blender';refdir.mkdir();cfg={'modules':['geometryRepair','uvUnwrap','pbrMaterials','webOptimization','visualReview'],'instructions':'Reference Set candidate post-processing','geometryRepairStrength':'conservative','uvStrategy':'preserve_or_smart','uvIslandMargin':.03,'materialTemplate':'neutral','targetTriangleRange':[20000,120000],'textureResolution':2048,'maxWebGlbMB':20,'preserveThickness':True,'maxThicknessLoss':.08,'maxDecimationPerPass':.2,'minThinAxisRatio':.08};cfg_path=root/'blender-config.json';cfg_path.write_text(json.dumps(cfg,ensure_ascii=False),encoding='utf-8');result=refine_blender(raw,refdir,cfg_path,log,cancelled,resolve_storage(asset['storage_path']))
+        refdir=root/'blender';refdir.mkdir();cfg={'modules':['geometryRepair','uvUnwrap','pbrMaterials','webOptimization','visualReview'],'instructions':'Reference Set candidate post-processing','geometryRepairStrength':'conservative','uvStrategy':'preserve_or_smart','uvIslandMargin':.03,'materialTemplate':'preserve_source','textureMode':'preserve_source','projectionCalibration':None,'targetTriangleRange':[20000,120000],'textureResolution':2048,'maxWebGlbMB':20,'preserveThickness':True,'maxThicknessLoss':.08,'maxDecimationPerPass':.2,'minThinAxisRatio':.08};cfg_path=root/'blender-config.json';cfg_path.write_text(json.dumps(cfg,ensure_ascii=False),encoding='utf-8');result=refine_blender(raw,refdir,cfg_path,log,cancelled,resolve_storage(asset['storage_path']))
         out=uid('ver');stamp=now();status='awaiting_review' if result.get('status')=='passed' else 'quality_failed'
         with db() as con:
             con.execute('INSERT INTO versions VALUES(?,?,?,?,?,?,?)',(out,r['project_id'],number,f'v{number:03d} · Reference Set 候选重生成','ready_for_review' if status=='awaiting_review' else 'quality_failed',dump(result),stamp))
@@ -972,6 +1058,9 @@ def seed_demo():
         if not src.exists():return
         pid='prj_0000000000000001';stamp=now();thumb='/public/yoyo-reference.png';con.execute('INSERT INTO projects(id,slug,name,subject_type,intended_use,quality,status,passed_stages,total_stages,actual_backend,thumbnail_url,settings,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)',(pid,'yoyo-demo','YOYO · 星空信使','character','web','high','ready_for_review',9,9,'Hunyuan3D + Blender',thumb,'{}',stamp,stamp));vid='ver_0000000000000001';jid='job_0000000000000001';con.execute('INSERT INTO versions VALUES(?,?,?,?,?,?,?)',(vid,pid,1,'v001 · 参考图投射基线','ready_for_review',dump({'scores':{'轮廓匹配':92,'比例一致性':95,'正面可信度':94,'侧面可信度':79,'背面可信度':72},'stats':{'fileSize':'16.7 MB','maxTexture':'2048 × 2048'},'differences':[{'severity':'minor','message':'背面披风厚度来自推断。'}],'approximations':[{'region':'背面','confidence':.72,'note':'参考证据有限'}]}),stamp));con.execute('INSERT INTO jobs(id,project_id,version_id,status,config_snapshot,requested_backend,actual_backend,model_version,seed,current_stage,attempt,created_at,started_at,completed_at,error_code,error_summary,cancel_requested,gpu_host_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL)',(jid,pid,vid,'completed','{}','hunyuan3d','Hunyuan3D + Blender','2.1',42,'web_optimization',1,stamp,stamp,stamp,None,None,0));con.execute('UPDATE projects SET current_job_id=? WHERE id=?',(jid,pid));con.execute('INSERT INTO artifacts VALUES(?,?,?,?,?,?,?,?,?,?,?)',('art_0000000000000001',jid,vid,'glb','yoyo-front-projection-v1.glb',src.relative_to(ROOT).as_posix(),'model/gltf-binary',src.stat().st_size,sha256(src),dump({'backend':'Hunyuan3D + Blender','baseline':True}),stamp))
 
+init_db()  # 模块级建表（幂等）；lifespan 中再次执行以覆盖测试/多进程
+from . import transfers as _transfers
+_transfers.init_db()
 with db() as con:
     _job_cols={r['name'] for r in con.execute('PRAGMA table_info(jobs)')}
     if 'gpu_host_id' not in _job_cols:con.execute('ALTER TABLE jobs ADD COLUMN gpu_host_id TEXT')

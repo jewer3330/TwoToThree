@@ -3,6 +3,7 @@ import json, math, struct, threading, time
 from pathlib import Path
 from .core import ROOT,db,dump,now,project_dir,resolve_storage,sha256,storage_path,uid
 from .backends import BackendError,CancelledError,capabilities,generate_hunyuan,generate_hunyuan_multiview,generate_sf3d,generate_triposr,render_blender
+from .transfers import TransferError
 
 STAGES=[('intake','素材接收'),('analysis','主体分析'),('geometry','几何生成'),('glb_validation','GLB 检查'),('multi_view_render','Blender 标准化与四视图'),('web_optimization','Web GLB 输出')]
 _threads:dict[str,threading.Thread]={}
@@ -52,6 +53,14 @@ def report(job,stage,status,started,warnings=None,error=None,next_action=None):
 def should_cancel(job_id):
     with db() as con:return bool(con.execute('SELECT cancel_requested FROM jobs WHERE id=?',(job_id,)).fetchone()[0])
 def run(job_id:str):
+    from .backends import bind_job
+    bind_job(job_id)
+    try:
+        _run_inner(job_id)
+    finally:
+        bind_job(None)   # P0：finally 清除线程 job 绑定，避免污染线程池/后续任务
+
+def _run_inner(job_id:str):
     try:
         with db() as con:
             job=dict(con.execute('SELECT * FROM jobs WHERE id=?',(job_id,)).fetchone());project=con.execute('SELECT subject_type FROM projects WHERE id=?',(job['project_id'],)).fetchone();con.execute("UPDATE jobs SET status='running',started_at=COALESCE(started_at,?) WHERE id=?",(now(),job_id))
@@ -102,11 +111,21 @@ def run(job_id:str):
                         elif backend=='triposr':result=generate_triposr(source_image,out,lambda m:log(job_id,m),lambda:should_cancel(job_id))
                         if result:break
                     except CancelledError:raise
+                    # 计算已经完成、仅产物传输失败时，必须交给外层进入
+                    # transfer_pending。绝不能把它当成模型失败继续跑下一个后端，
+                    # 否则会重复消耗 GPU 并覆盖可恢复的远端产物。
+                    except TransferError:raise
                     except Exception as exc:errors.append(f'{backend}: {exc}');warnings.append(f'{backend}-failed');log(job_id,f'{backend} 失败，准备降级：{exc}')
                 if not result:raise BackendError('所有生成后端失败：'+'; '.join(errors))
                 job['actual_backend']=result['backend'];job['model_version']=result.get('modelVersion')
                 with db() as con:con.execute('UPDATE jobs SET actual_backend=?,model_version=? WHERE id=?',(job['actual_backend'],job['model_version'],job_id));con.execute('UPDATE projects SET actual_backend=? WHERE id=?',(job['actual_backend'],job['project_id']))
                 add_artifact(job,'glb','baseline.glb',out,'model/gltf-binary',{**result,'preservedBaseline':True,'sourceAssetId':asset['id'],'sourceSha256':asset['sha256']})
+                # P0：Artifact 已注册到 DB → 显式 commit 传输（允许清理远端 GPU 产物）
+                if result.get('transferTid'):
+                    try:
+                        from .transfers import commit_transfer
+                        commit_transfer(result['transferTid'])
+                    except Exception:pass
                 processed=Path(result['processedImage']) if result.get('processedImage') else None
                 if processed and processed.exists():add_artifact(job,'condition-image','实际送入 Hunyuan 的裁边图',processed,'image/png',{'role':'front','backgroundRemoved':True,'foregroundCropped':True})
                 for role,path_text in result.get('processedImages',{}).items():
@@ -135,6 +154,11 @@ def run(job_id:str):
                 style=config.get('stylePreset',{'id':config.get('modelStyle','realistic'),'depthScale':1.0})
                 render_sources=render_blender(baseline,outdir,web_glb,lambda m:log(job_id,m),lambda:should_cancel(job_id),quality,texture_resolution,references,style)
                 add_artifact(job,'glb','web.glb',web_glb,'model/gltf-binary',{'backend':job['actual_backend'],'normalizedBy':'Blender 5.2','source':'baseline.glb','quality':quality,'modelStyle':style.get('id','realistic'),'styleFeaturePrompt':style.get('featurePrompt',''),'depthScale':style.get('depthScale',1.0),'geometryResolution':{'standard':256,'high':384,'ultra':512}[quality],'textureResolution':texture_resolution or None,'faceRefinement':quality=='ultra'})
+                # P0：Artifact 已注册 → 显式 commit 本 job 全部已 verified 传输（允许清理远端）
+                try:
+                    from .transfers import commit_job_transfers
+                    commit_job_transfers(job_id)
+                except Exception:pass
                 for view,source in render_sources.items():add_artifact(job,'render',view,source,'image/png',{'view':view,'renderer':'Blender 5.2'})
                 for texture in sorted((outdir/'textures').glob('*.png')):add_artifact(job,'texture',texture.name,texture,'image/png',{'resolution':texture_resolution,'projection':'multi-view','embeddedIn':'web.glb'})
             path=report(job,key,'passed',started,warnings=warnings,next_action=STAGES[index+1][0] if index+1<len(STAGES) else 'ready_for_review')
@@ -155,6 +179,16 @@ def run(job_id:str):
     except CancelledError as exc:
         with db() as con:con.execute("UPDATE jobs SET status='cancelled',completed_at=? WHERE id=?",(now(),job_id));con.execute("UPDATE projects SET status='cancelled',updated_at=? WHERE current_job_id=?",(now(),job_id))
         log(job_id,str(exc));emit(job_id,'job.status',{'status':'cancelled'})
+    except TransferError as exc:
+        # P0：传输失败 → transfer_pending（GPU 产物保留，不重跑推理，可 resume 续传）
+        from .transfers import pending_for_job
+        code=getattr(exc,'code',None) or 'TRANSFER_FAILED'
+        with db() as con:
+            con.execute("UPDATE jobs SET status='transfer_pending',error_code=?,error_summary=?,completed_at=? WHERE id=?",(code,str(exc)[:500],now(),job_id))
+            con.execute("UPDATE projects SET status='transfer_pending',updated_at=? WHERE current_job_id=?",(now(),job_id))
+        pending=pending_for_job(job_id)
+        log(job_id,f'传输失败进入 transfer_pending（{code}）：{exc}；GPU 产物保留，可恢复续传（{len(pending)} 项）')
+        emit(job_id,'job.status',{'status':'transfer_pending','errorCode':code,'pendingTransfers':len(pending)})
     except Exception as exc:
         with db() as con:con.execute("UPDATE jobs SET status='failed',error_code='WORKER_ERROR',error_summary=?,completed_at=? WHERE id=?",(str(exc),now(),job_id));con.execute("UPDATE projects SET status='failed',updated_at=? WHERE current_job_id=?",(now(),job_id))
         log(job_id,f'任务失败：{exc}');emit(job_id,'stage.failed',{'error':str(exc)})

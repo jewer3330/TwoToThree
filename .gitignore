@@ -37,3 +37,5 @@ review-layers.json
 # Codely CLI 本地记忆（不入库）
 CODELY.md
 .codely-cli/
+# Local tooling state and stray runtime logs
+*.log
