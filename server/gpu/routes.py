@@ -64,6 +64,7 @@ def overview():
 
 def start_services():
     from .probe import ProbeThread
+    from . import selfreg
     # AutoDL 节点从 env 自动注册（幂等），与其他 SSH 节点一起被调度
     try:
         hosts.ensure_autodl_registered()
@@ -71,3 +72,5 @@ def start_services():
         print(f"[gpu] AutoDL 节点注册失败：{exc}")
     ProbeThread(interval=30).start()
     scheduler.SchedulerThread().start()
+    # 自注册（WebSocket dial-out）节点的心跳超时监控
+    selfreg.start_monitor()

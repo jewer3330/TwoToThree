@@ -11,6 +11,7 @@ from ..core import DATA, dump, load, now
 HOSTS_FILE=DATA/'gpu_hosts.json'
 _lock=threading.RLock()
 _state:dict[str,dict]={}   # host_id -> {online,gpu,memTotal,memUsed,diskFree,caps,lastProbeAt,lastError,runningJobs,queuedJobs}
+_dynamic:dict[str,dict]={}  # 自注册节点（WebSocket dial-out，仅内存，不持久化到 gpu_hosts.json）
 _probe_pending:set[str]=set()
 
 def _read()->list[dict]:
@@ -26,7 +27,41 @@ def list_hosts()->list[dict]:
     with _lock:
         hosts=_read()
         for h in hosts: h['status']=_state.get(h['id'],{})
+        for hid,h in _dynamic.items():
+            h['status']=_state.get(hid,{})
+            hosts.append(dict(h))
         return hosts
+
+def register_dynamic(cfg:dict,status:dict|None=None)->dict:
+    """登记一台自注册（WebSocket dial-out）节点，仅存内存、不写入 gpu_hosts.json。
+
+    cfg 至少包含 id/name；可选 provider、maxConcurrentJobs、labels、caps、gpu 等。
+    """
+    with _lock:
+        host={
+            'id':cfg['id'],
+            'name':cfg.get('name') or cfg['id'],
+            'provider':cfg.get('provider','selfreg'),
+            'enabled':bool(cfg.get('enabled',True)),
+            'maxConcurrentJobs':int(cfg.get('maxConcurrentJobs',1) or 1),
+            'labels':list(cfg.get('labels') or []),
+            # 自注册节点无 SSH 字段，保留空值以兼容 probe/调度器数据结构
+            'host':cfg.get('host',''),'user':cfg.get('user',''),'key':cfg.get('key',''),
+            'root':cfg.get('root',''),'ext':cfg.get('ext',''),'work':cfg.get('work',''),
+            'os':cfg.get('os','linux'),'port':int(cfg.get('port') or 22),'password':cfg.get('password',''),
+            'createdAt':now(),
+        }
+        _dynamic[cfg['id']]=host
+        if status is not None:_state[cfg['id']]=status
+        return host
+
+def unregister_dynamic(host_id:str):
+    with _lock:
+        _dynamic.pop(host_id,None)
+        _state.pop(host_id,None)
+
+def dynamic_host_ids()->list[str]:
+    with _lock:return list(_dynamic.keys())
 
 def get_host(host_id:str)->dict|None:
     with _lock:

@@ -129,6 +129,9 @@ def backend_for(job:dict)->str:
     return config.get('primaryBackend','hunyuan3d')
 
 def _spawn(job:dict,host:dict):
+    if host.get('provider')=='selfreg':
+        _spawn_selfreg(job,host)
+        return
     def run_wrapper():
         from ..worker import run as worker_run
         try:
@@ -141,6 +144,20 @@ def _spawn(job:dict,host:dict):
     t=threading.Thread(target=run_wrapper,daemon=True,name=f'gpu-job-{job["id"][-6:]}-{host["id"][-6:]}')
     _threads[job['id']]=t
     t.start()
+
+
+def _spawn_selfreg(job:dict,host:dict):
+    """通过 WebSocket 长连接向自注册节点下发任务（节点主动 dial-out，无法 SSH 推）。"""
+    from . import selfreg
+    config=load(job['config_snapshot'],{})
+    ok=selfreg.dispatch(host['id'],{'type':'run_job','jobId':job['id'],'config':config})
+    if not ok:
+        # 下发失败（节点已断线）→ 任务回退 queued，运行计数回滚，等待下次调度
+        with db() as con:
+            con.execute("UPDATE jobs SET status='queued',gpu_host_id=NULL WHERE id=?",(job['id'],))
+        hosts.set_running(host['id'],-1)
+        hosts.set_state(host['id'],online=False,lastError='dispatch failed: node offline')
+        print(f'[gpu-scheduler] selfreg 节点 {host.get("name")} 下发失败，任务 {job["id"]} 回退')
 
 class SchedulerThread(threading.Thread):
     def __init__(self):

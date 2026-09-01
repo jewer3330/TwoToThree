@@ -14,6 +14,7 @@ from pydantic import BaseModel,Field
 from .core import DATA,ROOT,db,dump,init_db,load,now,project_dir,resolve_storage,rowdict,sha256,slugify,storage_path,uid
 from .worker import STAGES,launch
 from .gpu import routes as gpu_routes
+from .gpu import selfreg as gpu_selfreg
 from .printer import routes as printer_routes
 from .printpipeline import routes as printpipeline_routes
 from .backends import capabilities,refine_blender,generate_hunyuan,generate_hunyuan_multiview,export_stl_blender,remote_gpu,BackendError,CancelledError
@@ -61,6 +62,7 @@ app.add_middleware(SessionMiddleware,secret_key=os.environ.get('SESSION_SECRET',
 
 app.include_router(auth.router)
 app.include_router(gpu_routes.router)
+app.include_router(gpu_selfreg.router)
 app.include_router(printer_routes.router)
 app.include_router(printpipeline_routes.router)
 app.include_router(autodl.router)
