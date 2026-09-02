@@ -106,8 +106,11 @@ class SelfregRemote:
             marker: str = '', cwd_remote: str | None = None):
         from . import selfreg
         if marker:
-            # 让 agent 先拉取 pullbox 输入到节点本地 stage
-            selfreg.fetch_files_sync(self.node_id, marker, self.stage(marker), timeout=60)
+            # 让 agent 先拉取 pullbox 输入到节点本地 stage；失败必须中止，
+            # 绝不能不带输入继续执行（否则 GPU 空转后 FileNotFound 误导排查）。
+            ok, err = selfreg.fetch_files_sync(self.node_id, marker, self.stage(marker), timeout=60)
+            if not ok:
+                raise RuntimeError(f'selfreg 输入下发失败（{marker}）：{err}')
         exit_code, error = selfreg.run_command_sync(
             self.node_id, command, cwd=cwd_remote, timeout=timeout, log=log)
         if error:
