@@ -9,13 +9,28 @@ use_safetensors=False) 加载；dit ckpt 内已含 model/vae/conditioner 三个�
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 
 import torch
 from PIL import Image
 
-from hy3dgen.rembg import BackgroundRemover
-from hy3dgen.shapegen import Hunyuan3DDiTFlowMatchingPipeline
+from studio_paths import LOCAL_ROOT
+
+try:
+    from hy3dgen.rembg import BackgroundRemover
+    from hy3dgen.shapegen import Hunyuan3DDiTFlowMatchingPipeline
+except ImportError:
+    # 节点可能未把官方 hy3dgen 装入 venv，而是放在 LOCAL_ROOT/<runtime>/hy3dgen
+    # （如 Hunyuan3D-2mv-runtime，单图 2.1 与多视图共用同一官方包）。这里补路径
+    # 再导入，避免 ModuleNotFoundError 直接终止 GPU 任务。
+    for runtime in ('Hunyuan3D-2mv-runtime', 'Hunyuan3D-2-runtime', 'hunyuan-runtime'):
+        candidate = LOCAL_ROOT / runtime
+        if (candidate / 'hy3dgen').is_dir():
+            sys.path.insert(0, str(candidate))
+            break
+    from hy3dgen.rembg import BackgroundRemover
+    from hy3dgen.shapegen import Hunyuan3DDiTFlowMatchingPipeline
 
 
 ROOT = Path(__file__).resolve().parents[1]
