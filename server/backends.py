@@ -740,8 +740,6 @@ def render_blender(source:Path,output_dir:Path,web_glb:Path,log,cancelled,qualit
         size,sha=r.remote_metadata(web_remote)
         tid=record_pending(current_job_id(),r.host,marker,web_remote,str(web_glb),kind='glb',expected_size=size,expected_sha256=sha,host_cfg=cfg)
         r.download_dir(renders,output_dir)
-        tid=record_pending(current_job_id(),r.host,marker,web_remote,str(web_glb),kind='glb',expected_size=size,expected_sha256=sha,host_cfg=cfg)
-        r.download_dir(renders,output_dir)
         r.download_compressed(web_remote,web_glb,expected_size=size,expected_sha256=sha,kind='glb')
         mark_downloaded(tid);mark_verified(tid)
         _flatten(output_dir/'renders')
