@@ -32,6 +32,15 @@ import subprocess
 import sys
 from pathlib import Path
 
+# Windows GBK 控制台无法打印 ✅/❌ 等 emoji 会 UnicodeEncodeError 崩溃；
+# 统一按终端编码降级（GBK 下输出为 ? 而非崩溃）。
+try:
+    sys.stdout.reconfigure(errors="replace")
+    sys.stderr.reconfigure(errors="replace")
+except Exception:
+    pass
+
+
 ROOT = Path(__file__).resolve().parents[1]
 
 # 预期关键文件大小（用于完整性校验）
