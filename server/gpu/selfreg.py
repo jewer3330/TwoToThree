@@ -152,23 +152,31 @@ def upload_file_sync(node_id:str, remote_path:str, timeout:float=600, upload_id:
     """请求 agent 把远端文件 POST 回控制面（产物回传）。
 
     worker 线程同步等待；成功后文件落在收件目录 inbox/<upload_id>/，由调用方取走。
-    返回 (ok, error)。
+    返回 (ok, error)。长命令通道偶发抖动：失败/超时自动重试。
     """
-    upload_id = upload_id or f'up-{uuid.uuid4().hex[:12]}'
-    waiter = {'event': threading.Event(), 'ok': False, 'error': None}
-    with _lock:
-        _upload_waiters[upload_id] = waiter
-    ok = dispatch(node_id, {'type': 'upload_file', 'uploadId': upload_id,
-                            'path': remote_path, 'timeout': int(timeout)})
-    if not ok:
+    last_err = None
+    for attempt in range(3):
+        upload_id = upload_id or f'up-{uuid.uuid4().hex[:12]}'
+        waiter = {'event': threading.Event(), 'ok': False, 'error': None}
         with _lock:
-            _upload_waiters.pop(upload_id, None)
-        return False, '节点离线或消息投递失败'
-    if not waiter['event'].wait(timeout=max(30, timeout + 30)):
-        with _lock:
-            _upload_waiters.pop(upload_id, None)
-        return False, f'回传超时（{timeout}s）'
-    return waiter['ok'], waiter['error']
+            _upload_waiters[upload_id] = waiter
+        ok = dispatch(node_id, {'type': 'upload_file', 'uploadId': upload_id,
+                                'path': remote_path, 'timeout': int(timeout)})
+        if not ok:
+            with _lock:
+                _upload_waiters.pop(upload_id, None)
+            last_err = '节点离线或消息投递失败'
+        elif not waiter['event'].wait(timeout=max(30, timeout + 30)):
+            with _lock:
+                _upload_waiters.pop(upload_id, None)
+            last_err = f'回传超时（{timeout}s）'
+        else:
+            if waiter['ok']:
+                return True, None
+            last_err = waiter['error'] or 'agent 回传失败'
+        if attempt < 2:
+            time.sleep(5 * (attempt + 1))
+    return False, last_err
 
 
 def _resolve_upload(upload_id:str, ok:bool, error:str|None=None):
@@ -186,6 +194,9 @@ def fetch_files_sync(node_id:str, marker:str, dest_dir:str, timeout:float=120) -
 
     返回 (ok, error)。agent 用 HTTP GET {control}/api/gpu/selfreg/pullbox/{marker}/{name}
     逐个下载；控制面 URL 由 agent 端自行拼接（它知道自己连的 CONTROL_URL）。
+
+    长命令通道偶发网络抖动/agent 瞬时断线：dispatch 失败或超时自动重试（agent
+    断线后指数退避重连 ≤30s），避免一次抖动直接打挂 GPU 任务。
     """
     pullbox = DATA / 'selfreg' / 'pullbox' / marker
     if not pullbox.exists():
@@ -193,21 +204,29 @@ def fetch_files_sync(node_id:str, marker:str, dest_dir:str, timeout:float=120) -
     names = sorted(p.name for p in pullbox.iterdir() if p.name != '.manifest' and p.is_file())
     if not names:
         return True, None
-    waiter = {'event': threading.Event(), 'ok': False, 'error': None}
-    fid = f'fetch-{uuid.uuid4().hex[:12]}'
-    with _lock:
-        _upload_waiters[fid] = waiter   # 复用 waiters 机制等待 fetch_done
-    ok = dispatch(node_id, {'type': 'fetch_files', 'fetchId': fid, 'marker': marker,
-                            'files': names, 'destDir': dest_dir})
-    if not ok:
+    last_err = None
+    for attempt in range(3):
+        waiter = {'event': threading.Event(), 'ok': False, 'error': None}
+        fid = f'fetch-{uuid.uuid4().hex[:12]}'
         with _lock:
-            _upload_waiters.pop(fid, None)
-        return False, '节点离线或消息投递失败'
-    if not waiter['event'].wait(timeout=timeout):
-        with _lock:
-            _upload_waiters.pop(fid, None)
-        return False, '输入下发超时'
-    return waiter['ok'], waiter['error']
+            _upload_waiters[fid] = waiter   # 复用 waiters 机制等待 fetch_done
+        ok = dispatch(node_id, {'type': 'fetch_files', 'fetchId': fid, 'marker': marker,
+                                'files': names, 'destDir': dest_dir})
+        if not ok:
+            with _lock:
+                _upload_waiters.pop(fid, None)
+            last_err = '节点离线或消息投递失败'
+        elif not waiter['event'].wait(timeout=timeout):
+            with _lock:
+                _upload_waiters.pop(fid, None)
+            last_err = '输入下发超时'
+        else:
+            if waiter['ok']:
+                return True, None
+            last_err = waiter['error'] or 'agent 拉取失败'
+        if attempt < 2:
+            time.sleep(5 * (attempt + 1))
+    return False, last_err
 
 
 # --------------------------------------------------------------------------- #
