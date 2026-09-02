@@ -131,11 +131,16 @@ def check_control() -> list[dict]:
         sqlite_ok, sqlite_val = False, str(exc)
     checks.append(_check("sqlite", "SQLite 数据目录可写", sqlite_ok, sqlite_val))
 
-    # OSS 凭据
+    # OSS 凭据（仅 prod 必须；dev 环境隔离为不配置）
     oss_configured = all(_env(k) for k in ("OSS_ACCESS_KEY_ID", "OSS_ACCESS_KEY_SECRET", "OSS_BUCKET"))
-    checks.append(_check("oss", "OSS 凭据完整", oss_configured,
-                         _env("OSS_BUCKET") or "未设置",
-                         "OSS_ACCESS_KEY_ID/SECRET/BUCKET 三者须齐备"))
+    if (_env("SITE_ROLE", "prod") or "prod").strip().lower() == "dev":
+        checks.append(_check("oss", "OSS 凭据（dev 不应配置）", True,
+                             "已配置" if oss_configured else "未配置（正确）",
+                             "开发环境隔离：不应持有生产 OSS 凭据"))
+    else:
+        checks.append(_check("oss", "OSS 凭据完整（prod 必须）", oss_configured,
+                             _env("OSS_BUCKET") or "未设置",
+                             "正式线 OSS_ACCESS_KEY_ID/SECRET/BUCKET 三者须齐备"))
 
     # 传输策略环境硬隔离（不可选）：
     #   prod —— 只能阿里 OSS（STORAGE_BACKEND=oss），自家 CDN 视为阻断
