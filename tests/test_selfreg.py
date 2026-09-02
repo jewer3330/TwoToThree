@@ -145,6 +145,31 @@ def test_selfreg_run_accepts_cwd_remote(monkeypatch):
     assert calls['cwd'] == '/repo'
 
 
+def test_selfreg_run_fetches_by_stage_token(monkeypatch):
+    """backends 传 marker=完整 stage 路径（SSH 惯例）时，selfreg 需按末段 token
+    拉取 pullbox 输入到对应 stage 目录；拉取失败必须中止而不是裸跑 GPU。"""
+    from server.gpu import selfreg as sr
+    from server.gpu.selfreg_remote import SelfregRemote
+    node = {'os': 'linux', 'workDir': '/w', 'repoRoot': '/r', 'extRoot': '/e'}
+    remote = SelfregRemote('n1', node)
+    calls = {}
+
+    def fake_fetch(node_id, marker, dest_dir, timeout=120):
+        calls['fetch'] = (marker, dest_dir)
+        return False, 'boom'
+
+    monkeypatch.setattr(sr, 'fetch_files_sync', fake_fetch)
+    try:
+        remote.run(['echo', 'hi'], lambda m: None, lambda: False, timeout=60,
+                   marker='/w/selfreg-stage/p3d-abc123')
+        raise AssertionError('fetch 失败应中止执行')
+    except RuntimeError as exc:
+        assert '输入下发失败' in str(exc)
+    assert calls['fetch'] == ('p3d-abc123', '/w/selfreg-stage/p3d-abc123')
+    assert remote._marker_token('/w/selfreg-stage/p3d-abc123') == 'p3d-abc123'
+    assert remote._marker_token('p3d-xyz') == 'p3d-xyz'
+
+
 # ---------- scheduler：selfreg 不再把 worker 派到 agent 侧 ----------
 
 def test_scheduler_selfreg_runs_control_plane_worker(monkeypatch):

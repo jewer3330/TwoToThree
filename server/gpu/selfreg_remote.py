@@ -102,15 +102,24 @@ class SelfregRemote:
             pass
 
     # ---- 命令执行 ----
+    def _marker_token(self, marker: str) -> str:
+        """backends 以 SSH 惯例把完整 stage 路径当 marker 传入（仅用于进程匹配）；
+        selfreg 需要的是 pullbox 键（stage 末段 token）。两者都兼容。"""
+        if not marker:
+            return ''
+        token = marker.replace('\\', '/').rstrip('/')
+        return token.rsplit('/', 1)[-1]
+
     def run(self, command: list[str], log, cancelled, timeout: int = 3600,
             marker: str = '', cwd_remote: str | None = None):
         from . import selfreg
-        if marker:
+        token = self._marker_token(marker)
+        if token:
             # 让 agent 先拉取 pullbox 输入到节点本地 stage；失败必须中止，
             # 绝不能不带输入继续执行（否则 GPU 空转后 FileNotFound 误导排查）。
-            ok, err = selfreg.fetch_files_sync(self.node_id, marker, self.stage(marker), timeout=60)
+            ok, err = selfreg.fetch_files_sync(self.node_id, token, self.stage(token), timeout=60)
             if not ok:
-                raise RuntimeError(f'selfreg 输入下发失败（{marker}）：{err}')
+                raise RuntimeError(f'selfreg 输入下发失败（{token}）：{err}')
         exit_code, error = selfreg.run_command_sync(
             self.node_id, command, cwd=cwd_remote, timeout=timeout, log=log)
         if error:
