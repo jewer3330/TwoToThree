@@ -95,8 +95,8 @@ def _detect_caps(local: Path) -> dict[str, bool]:
     refiner = ROOT / "pipeline" / "blender_auto_refine.py"
     stl = ROOT / "pipeline" / "blender_export_stl.py"
     return {
-        "hunyuan3d": bool(py.exists()) and runner.exists() and (model / "hunyuan3d-dit-v2-1" / "model.fp16.ckpt").exists(),
-        "hunyuan3dMultiview": bool(py.exists()) and mv_runner.exists() and (mv_model / "hunyuan3d-dit-v2-mv" / "model.fp16.safetensors").exists(),
+        "hunyuan3d": bool(py.exists()) and runner.exists() and (model / "hunyuan3d-dit-v2-1" / "model.fp16.ckpt").exists() and (model / "hunyuan3d-dit-v2-1" / "config.yaml").exists(),
+        "hunyuan3dMultiview": bool(py.exists()) and mv_runner.exists() and (mv_model / "hunyuan3d-dit-v2-mv" / "model.fp16.safetensors").exists() and (mv_model / "hunyuan3d-dit-v2-mv" / "config.yaml").exists(),
         "sf3d": False,
         "triposr": False,
         "blender": blender.exists() and renderer.exists(),
