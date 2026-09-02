@@ -58,19 +58,36 @@ def bind_job(job_id:str|None):
 def current_job_id()->str:
     return getattr(_local,'job_id','') or ''
 
-def remote_from_cfg(cfg:dict)->Remote|None:
-    if not cfg or not cfg.get('host'):return None
-    return Remote(
-        cfg['host'],
-        cfg.get('user') or 'root',
-        Path(cfg['key']) if cfg.get('key') else None,
-        cfg.get('root') or '',
-        cfg.get('ext') or '',
-        cfg.get('work') or '',
-        os_type=cfg.get('os') or 'windows',
-        port=int(cfg.get('port') or 22),
-        password=cfg.get('password') or '',
-    )
+def remote_from_cfg(cfg:dict):
+    """根据主机配置返回 Remote（SSH）或 SelfregRemote（WS 自注册节点）。
+
+    返回对象附加 _host_cfg（注册表原始配置），供 capabilities() 在线程绑定
+    主机时按主机 status.caps 判定能力（selfreg 由 agent 上报、SSH 由探针刷新）。
+    """
+    if not cfg or not cfg.get('id'):
+        return None
+    r=None
+    if cfg.get('provider') == 'selfreg':
+        from .gpu import selfreg as _sr
+        from .gpu.selfreg_remote import SelfregRemote
+        agent = _sr._agents.get(cfg['id'])
+        node = agent.get('node') if agent else None
+        r=SelfregRemote(cfg['id'], node)
+    elif cfg.get('host'):
+        r=Remote(
+            cfg['host'],
+            cfg.get('user') or 'root',
+            Path(cfg['key']) if cfg.get('key') else None,
+            cfg.get('root') or '',
+            cfg.get('ext') or '',
+            cfg.get('work') or '',
+            os_type=cfg.get('os') or 'windows',
+            port=int(cfg.get('port') or 22),
+            password=cfg.get('password') or '',
+        )
+    if r is not None:
+        r._host_cfg=dict(cfg)
+    return r
 
 def _host_cfg_snapshot(r:'Remote')->dict:
     """传输状态持久化所需的连接快照（含密码，仅存主控本地 transfer_state.db）。"""
@@ -392,6 +409,24 @@ def _rc(r:'Remote|None'=None):
     }
 
 def capabilities():
+    """当前执行上下文可用能力。
+
+    优先级：线程绑定主机（worker 被调度器派到某台 GPU）> env 远程主机 > 本机。
+    绑定主机的能力取注册表 status.caps（selfreg=agent 上报、SSH=探针刷新），
+    与调度器 _pick_host 的判定一致，避免控制面因本地无权重/Blender 而误判
+    environment unavailable，导致任务永远不落 GPU。
+    """
+    bound=getattr(_local,'remote',None)
+    hcfg=getattr(bound,'_host_cfg',None) if bound is not None else None
+    if bound is not None and hcfg and hcfg.get('id'):
+        try:
+            from .gpu import hosts as gpu_hosts
+            for h in gpu_hosts.list_hosts():
+                if h.get('id')==hcfg['id']:
+                    caps=h.get('status',{}).get('caps') or {}
+                    return {k:bool(caps.get(k)) for k in _CAP_KEYS}
+        except Exception:
+            pass
     if MODE=='remote' and REMOTE_HOST:
         return _remote_capabilities(remote())
     return {
@@ -533,7 +568,7 @@ def probe_host(cfg:dict)->dict:
     return result
 
 def remote_gpu()->dict|None:
-    if MODE!='remote' or not REMOTE_HOST:return None
+    if remote() is None:return None
     r=remote()
     try:
         if r.is_windows:
@@ -573,7 +608,7 @@ def generate_hunyuan(image:Path,output:Path,seed:int,quality:str,log,cancelled):
     steps={'standard':20,'high':30,'ultra':40}.get(quality,20)
     resolution={'standard':256,'high':384,'ultra':512}.get(quality,256)
     processed=output.parent/'condition-front.png'
-    if MODE!='remote' or not REMOTE_HOST:
+    if remote() is None:
         command=[str(HUNYUAN_PY),str(HUNYUAN_RUNNER),'--image',str(image),'--model',str(HUNYUAN_MODEL),'--output',str(output),'--processed-image-output',str(processed),'--steps',str(steps),'--resolution',str(resolution),'--seed',str(seed)]
         log(f'Hunyuan3D 2.1 启动：steps={steps}, octree={resolution}, seed={seed}')
         run_process(command,ROOT,log,cancelled,timeout=2400)
@@ -605,7 +640,7 @@ def generate_hunyuan_multiview(images:dict[str,Path],output:Path,seed:int,qualit
     if missing:raise BackendError(f'多视图生成缺少视角：{missing}')
     steps={'standard':20,'high':30,'ultra':40}.get(quality,20);resolution={'standard':256,'high':384,'ultra':512}.get(quality,256)
     processed=output.parent/'multiview-conditions'
-    if MODE!='remote' or not REMOTE_HOST:
+    if remote() is None:
         command=[str(HUNYUAN_PY),str(HUNYUAN_MV_RUNNER),'--model',str(HUNYUAN_MV_MODEL),'--output',str(output),'--processed-dir',str(processed),'--steps',str(steps),'--resolution',str(resolution),'--seed',str(seed)]
         for role in ('front','side','back'):command.extend([f'--{role}',str(images[role])])
         weights={role:max(0.1,min(3.0,float(view_weights.get(role,1.0)))) for role in ('front','side','back')}
@@ -640,7 +675,7 @@ def generate_hunyuan_multiview(images:dict[str,Path],output:Path,seed:int,qualit
 
 def generate_sf3d(image:Path,output:Path,texture_resolution:int,log,cancelled):
     staging=output.parent/'sf3d-output';staging.mkdir(parents=True,exist_ok=True)
-    if MODE!='remote' or not REMOTE_HOST:
+    if remote() is None:
         command=[str(SF3D_PY),'run.py',str(image),'--output-dir',str(staging),'--texture-resolution',str(texture_resolution),'--remesh_option','none','--target_vertex_count','-1']
         log(f'Stable Fast 3D 启动：texture={texture_resolution}')
         run_process(command,SF3D_REPO,log,cancelled,timeout=1200)
@@ -662,7 +697,7 @@ def generate_sf3d(image:Path,output:Path,texture_resolution:int,log,cancelled):
 
 def generate_triposr(image:Path,output:Path,log,cancelled):
     staging=output.parent/'triposr-output';staging.mkdir(parents=True,exist_ok=True)
-    if MODE!='remote' or not REMOTE_HOST:
+    if remote() is None:
         command=[str(TRIPOSR_PY),'run.py',str(image),'--output-dir',str(staging),'--model-save-format','glb']
         log('TripoSR 启动')
         run_process(command,TRIPOSR_REPO,log,cancelled,timeout=1200)
@@ -684,7 +719,7 @@ def generate_triposr(image:Path,output:Path,log,cancelled):
 
 def render_blender(source:Path,output_dir:Path,web_glb:Path,log,cancelled,quality:str='standard',texture_resolution:int=0,references:dict[str,Path]|None=None,style_preset:dict|None=None):
     preset=style_preset or {};style_id=str(preset.get('id','realistic'));depth_scale=max(.35,min(1.0,float(preset.get('depthScale',1.0))))
-    if MODE!='remote' or not REMOTE_HOST:
+    if remote() is None:
         command=[str(BLENDER),'--background','--factory-startup','--python',str(BLENDER_RENDERER),'--','--input',str(source),'--output-dir',str(output_dir),'--web-glb',str(web_glb),'--quality',quality,'--texture-resolution',str(texture_resolution),'--style',style_id,'--depth-scale',str(depth_scale)]
         for role,path in (references or {}).items():
             if role in ('front','side','back') and path.exists():command.extend([f'--{role}',str(path)])
@@ -716,7 +751,7 @@ def render_blender(source:Path,output_dir:Path,web_glb:Path,log,cancelled,qualit
     return expected
 
 def refine_blender(source:Path,output_dir:Path,config_path:Path,log,cancelled,reference_image:Path|None=None):
-    if MODE!='remote' or not REMOTE_HOST:
+    if remote() is None:
         command=[str(BLENDER),'--background','--factory-startup','--python',str(BLENDER_REFINER),'--','--input',str(source),'--output-dir',str(output_dir),'--config',str(config_path)]
         if reference_image:command.extend(['--reference-image',str(reference_image)])
         log('启动真实 Blender 后台自动精修')
@@ -743,7 +778,7 @@ def refine_blender(source:Path,output_dir:Path,config_path:Path,log,cancelled,re
     return result
 
 def export_stl_blender(source:Path,output:Path,scope:str,unit:str,apply_modifiers:bool,log,target_height_mm:float|None=None):
-    if MODE!='remote' or not REMOTE_HOST:
+    if remote() is None:
         command=[str(BLENDER),'--background','--factory-startup','--python',str(BLENDER_STL_EXPORTER),'--','--input',str(source),'--output',str(output),'--scope',scope,'--unit',unit]
         if apply_modifiers:command.append('--apply-modifiers')
         if target_height_mm is not None:command.extend(['--target-height-mm',str(target_height_mm)])

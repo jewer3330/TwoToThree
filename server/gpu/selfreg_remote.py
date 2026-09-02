@@ -31,8 +31,15 @@ class SelfregRemote:
         node = node or {}
         os_name = (node.get('os') or 'linux').lower()
         self.os_type = 'windows' if os_name == 'windows' else 'linux'
-        # 节点本地路径约定：work 根由 agent 上报（如 D:\print3d\work）
-        self.work = str(node.get('workDir') or node.get('work') or '/root/autodl-tmp/print3d/work')
+        # 与 SSH Remote 对齐的字段（_rc / transfers 用）
+        self.host = node_id                       # 唯一标识（非真实 host）
+        self.user = 'selfreg'
+        self.key = None
+        self.root = str(node.get('repoRoot') or node.get('root') or '')
+        self.ext = str(node.get('extRoot') or node.get('ext') or self.root)
+        self.work = str(node.get('workDir') or node.get('work') or '')
+        self.port = 22
+        self.password = ''
         self.stage_root = 'selfreg-stage'
 
     # ---- 路径（节点本地视角）----
@@ -57,6 +64,10 @@ class SelfregRemote:
             if s:
                 out.append(s)
         return self.sep.join(out)
+
+    def _split(self, p: str) -> tuple[str, str]:
+        p = self.norm(p).rstrip(self.sep)
+        return p.rsplit(self.sep, 1) if self.sep in p else ('', p)
 
     def stage(self, marker: str) -> str:
         """节点本地 stage 目录（相对节点 work）。"""
@@ -91,13 +102,14 @@ class SelfregRemote:
             pass
 
     # ---- 命令执行 ----
-    def run(self, command: list[str], log, cancelled, timeout: int = 3600, marker: str = ''):
+    def run(self, command: list[str], log, cancelled, timeout: int = 3600,
+            marker: str = '', cwd_remote: str | None = None):
         from . import selfreg
         if marker:
             # 让 agent 先拉取 pullbox 输入到节点本地 stage
             selfreg.fetch_files_sync(self.node_id, marker, self.stage(marker), timeout=60)
         exit_code, error = selfreg.run_command_sync(
-            self.node_id, command, timeout=timeout, log=log)
+            self.node_id, command, cwd=cwd_remote, timeout=timeout, log=log)
         if error:
             raise RuntimeError(f'selfreg 节点执行失败：{error}')
         if exit_code:
@@ -128,6 +140,52 @@ class SelfregRemote:
     def download(self, remote_file: str, local_file: Path, expected_size=None,
                  expected_sha256=None, kind='file', legacy_scp: bool = True):
         self._pull_single(remote_file, local_file)
+
+    def download_dir(self, remote_dir: str, local_dir: Path, expected_size=None,
+                     expected_sha256=None):
+        """远端目录 → agent 端 tar 打包 → 单文件回传 inbox → 本地解压。
+
+        语义对齐 backends.Remote.download_dir（归档内含 <name>/ 一层时上提）。
+        目录产物（Blender 四视图/精修/SF3D/TripoSR）都必须走这里。
+        """
+        import tarfile
+        from . import selfreg
+        remote_dir = self.norm(remote_dir)
+        parent, name = self._split(remote_dir)
+        tgz = f'{remote_dir}.tgz'
+        exit_code, error = selfreg.run_command_sync(
+            self.node_id, ['tar', '-czf', tgz, '-C', parent, name], timeout=300)
+        if error:
+            raise RuntimeError(f'selfreg 目录打包失败：{error}')
+        if exit_code:
+            raise RuntimeError(f'selfreg 目录打包退出码 {exit_code}')
+        upload_id = f'up-{uuid.uuid4().hex[:12]}'
+        ok, err = selfreg.upload_file_sync(self.node_id, tgz, upload_id=upload_id)
+        if not ok:
+            raise RuntimeError(f'selfreg 产物回传失败：{err}')
+        inbox = self._inbox_root(upload_id)
+        files = sorted(inbox.iterdir()) if inbox.exists() else []
+        if not files:
+            raise RuntimeError(f'selfreg 产物未到达 inbox：{tgz}')
+        local_dir.mkdir(parents=True, exist_ok=True)
+        tmp = local_dir / 'archive.tgz'
+        shutil.move(str(files[0]), str(tmp))
+        try:
+            with tarfile.open(tmp, 'r:gz') as t:
+                t.extractall(str(local_dir))
+            child = local_dir / name
+            if child.is_dir() and child != local_dir:
+                for item in list(child.iterdir()):
+                    target = local_dir / item.name
+                    if target.exists():
+                        if target.is_dir():
+                            shutil.rmtree(target, ignore_errors=True)
+                        else:
+                            target.unlink()
+                    shutil.move(str(item), str(target))
+                shutil.rmtree(child, ignore_errors=True)
+        finally:
+            tmp.unlink(missing_ok=True)
 
     def _pull_single(self, remote_file: str, local_file: Path):
         """agent 上传单个文件到 inbox → 控制面拷贝到 local_file。"""

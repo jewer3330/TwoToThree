@@ -126,6 +126,12 @@ def _capabilities()->dict:
 def hello_message()->dict:
     gpu,mem_total,mem_used=_gpu_snapshot()
     caps=_capabilities()
+    repo_root=str(Path(__file__).resolve().parents[1])
+    try:
+        from studio_paths import EXTERNAL_ROOT
+        ext_root=str(EXTERNAL_ROOT)
+    except Exception:
+        ext_root=os.environ.get('STUDIO_EXTERNAL_ROOT','')
     return {
         'type':'hello',
         'token':WORKER_TOKEN,
@@ -138,6 +144,8 @@ def hello_message()->dict:
             'labels':[],
             'os':'linux' if os.name!='nt' else 'windows',
             'workDir':str(_work_root()),
+            'repoRoot':repo_root,
+            'extRoot':ext_root,
         },
     }
 
@@ -259,9 +267,10 @@ class Agent:
         import httpx
         try:
             url=f'{CONTROL_URL}/api/gpu/selfreg/upload/{upload_id}'
+            headers={'X-Worker-Token':WORKER_TOKEN} if WORKER_TOKEN else {}
             with open(path,'rb') as fh:
                 name=os.path.basename(path)
-                r=httpx.post(url,files={'file':(name,fh)},timeout=timeout)
+                r=httpx.post(url,files={'file':(name,fh)},headers=headers,timeout=timeout)
             ok=r.status_code<300
             await self._send({'type':'upload_done','uploadId':upload_id,'ok':ok,
                               'error':None if ok else f'HTTP {r.status_code}'})
@@ -274,9 +283,10 @@ class Agent:
         import httpx
         try:
             os.makedirs(dest_dir, exist_ok=True)
+            headers={'X-Worker-Token':WORKER_TOKEN} if WORKER_TOKEN else {}
             for name in files:
                 url=f'{CONTROL_URL}/api/gpu/selfreg/pullbox/{marker}/{name}'
-                resp=httpx.get(url,timeout=300)
+                resp=httpx.get(url,headers=headers,timeout=300)
                 resp.raise_for_status()
                 target=os.path.join(dest_dir,name)
                 with open(target,'wb') as fh:

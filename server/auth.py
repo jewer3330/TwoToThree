@@ -164,6 +164,11 @@ def requires_admin(path: str, method: str) -> bool:
 def is_public(path: str) -> bool:
     if path in PUBLIC_PATHS or any(path.startswith(p) for p in PUBLIC_PREFIXES):
         return True
+    # selfreg 数据面（pullbox 输入下发 / inbox 产物回传）是 GPU agent 的机器
+    # 通道，不走浏览器会话；由 selfreg 端点内校验 X-Worker-Token（与 /api/gpu/ws
+    # 握手同一套鉴权，WORKER_TOKEN 未配置时放行用于本地开发）。
+    if path.startswith('/api/gpu/selfreg/'):
+        return True
     # SPA HTML 必须可加载，实际数据、模型和 API 仍由中间件保护。
     return not path.startswith(('/api/', '/data/', '/public/'))
 

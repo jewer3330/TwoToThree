@@ -129,35 +129,32 @@ def backend_for(job:dict)->str:
     return config.get('primaryBackend','hunyuan3d')
 
 def _spawn(job:dict,host:dict):
-    if host.get('provider')=='selfreg':
-        _spawn_selfreg(job,host)
-        return
+    """在控制面线程执行任务：bind_host(host) 后 worker.run。
+
+    provider 统一处理：
+      - ssh/autodl：backends.Remote（SSH/scp）在节点执行 Hunyuan/Blender
+      - selfreg：worker 仍在控制面跑（DB/素材在控制面），GPU 命令经
+        SelfregRemote（WS run_cmd + pullbox/inbox）在节点执行。
+    不再向 agent 派发 run_job——节点无控制面 DB/素材，agent 侧 worker.run 会
+    找不到任务，导致任务滞留 dispatched、GPU 空转。
+    """
     def run_wrapper():
         from ..worker import run as worker_run
         try:
             bind_host(host)
             worker_run(job['id'])
-        except Exception:pass
+        except Exception as exc:
+            print(f'[gpu-scheduler] 任务 {job["id"]} 在主机 {host.get("name")} 执行异常：{exc}')
         finally:
             bind_host(None)
             hosts.set_running(host['id'],-1)
+    if host.get('provider')=='selfreg':
+        # 复用同一执行路径：控制面 worker + 线程绑定 selfreg 主机
+        # （v2 WS 命令通道）；失败时由 worker 落 failed/error 状态。
+        print(f'[gpu-scheduler] selfreg 节点 {host.get("name")} 领取任务 {job["id"]}（WS run_cmd 通道）')
     t=threading.Thread(target=run_wrapper,daemon=True,name=f'gpu-job-{job["id"][-6:]}-{host["id"][-6:]}')
     _threads[job['id']]=t
     t.start()
-
-
-def _spawn_selfreg(job:dict,host:dict):
-    """通过 WebSocket 长连接向自注册节点下发任务（节点主动 dial-out，无法 SSH 推）。"""
-    from . import selfreg
-    config=load(job['config_snapshot'],{})
-    ok=selfreg.dispatch(host['id'],{'type':'run_job','jobId':job['id'],'config':config})
-    if not ok:
-        # 下发失败（节点已断线）→ 任务回退 queued，运行计数回滚，等待下次调度
-        with db() as con:
-            con.execute("UPDATE jobs SET status='queued',gpu_host_id=NULL WHERE id=?",(job['id'],))
-        hosts.set_running(host['id'],-1)
-        hosts.set_state(host['id'],online=False,lastError='dispatch failed: node offline')
-        print(f'[gpu-scheduler] selfreg 节点 {host.get("name")} 下发失败，任务 {job["id"]} 回退')
 
 class SchedulerThread(threading.Thread):
     def __init__(self):

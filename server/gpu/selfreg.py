@@ -27,7 +27,7 @@
 from __future__ import annotations
 import asyncio, json, os, threading, time, uuid
 from pathlib import Path
-from fastapi import APIRouter, File, UploadFile, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi import APIRouter, File, Request, UploadFile, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.responses import FileResponse, Response
 from ..core import DATA
 from . import hosts
@@ -218,15 +218,24 @@ def inbox_root(upload_id:str) -> Path:
     return DATA / 'selfreg' / 'inbox' / upload_id
 
 
+def _require_worker_token(request: Request):
+    """机器通道鉴权：与 /api/gpu/ws 握手一致，校验 X-Worker-Token。
+
+    控制面设置了 WORKER_TOKEN 时必须匹配，否则 401（fail-closed）；
+    未设置（本地开发/测试）时放行。供 pullbox/inbox 数据面端点使用。
+    """
+    from .. import config
+    if not config.WORKER_TOKEN:
+        return
+    if (request.headers.get('x-worker-token') or '') != config.WORKER_TOKEN:
+        raise HTTPException(401, 'invalid or missing worker token')
+
+
 @router.post('/api/gpu/selfreg/upload/{upload_id}')
-async def selfreg_upload(upload_id:str, file:UploadFile=File(...)):
+async def selfreg_upload(upload_id:str, request:Request, file:UploadFile=File(...)):
     """agent 回传产物：POST multipart 到 /api/gpu/selfreg/upload/<uploadId>。
     落盘到收件目录，随后 worker 的 upload_file_sync 唤醒取走。"""
-    from .. import config
-    # 与 hello 相同的 token 鉴权放 query 简单校验；无 token 时跳过（测试）
-    if config.WORKER_TOKEN:
-        # 要求 header X-Worker-Token
-        pass
+    _require_worker_token(request)
     root = inbox_root(upload_id)
     root.mkdir(parents=True, exist_ok=True)
     safe = Path(file.filename or 'payload.bin').name
@@ -240,15 +249,17 @@ async def selfreg_upload(upload_id:str, file:UploadFile=File(...)):
 
 
 @router.get('/api/gpu/selfreg/upload/{upload_id}')
-def selfreg_upload_status(upload_id:str):
+def selfreg_upload_status(upload_id:str, request:Request):
+    _require_worker_token(request)
     root = inbox_root(upload_id)
     return {'exists': root.exists() and any(root.iterdir()) if root.exists() else False,
             'files': [p.name for p in root.iterdir()] if root.exists() else []}
 
 
 @router.get('/api/gpu/selfreg/pullbox/{marker}/{filename}')
-def selfreg_pullbox(marker:str, filename:str):
+def selfreg_pullbox(marker:str, filename:str, request:Request):
     """agent 下载控制面下发的输入文件（对应 SelfregRemote.prepare 的 pullbox）。"""
+    _require_worker_token(request)
     root = DATA / 'selfreg' / 'pullbox' / marker
     safe = Path(filename).name
     if safe != filename:
