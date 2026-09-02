@@ -137,31 +137,32 @@ def check_control() -> list[dict]:
                          _env("OSS_BUCKET") or "未设置",
                          "OSS_ACCESS_KEY_ID/SECRET/BUCKET 三者须齐备"))
 
-    # 传输策略区分环境角色：
-    #   prod（默认，最严格）——正式线必须 STORAGE_BACKEND=oss（阿里 OSS），禁止自家 CDN 回退
-    #   dev —— 开发环境允许自家 CDN（STORAGE_BACKEND=cdn），不强制 OSS
+    # 传输策略环境硬隔离（不可选）：
+    #   prod —— 只能阿里 OSS（STORAGE_BACKEND=oss），自家 CDN 视为阻断
+    #   dev  —— 只能自家 CDN（STORAGE_BACKEND=cdn），配置生产 OSS 凭据视为阻断
     site_role = (_env("SITE_ROLE", "prod") or "prod").strip().lower()
     storage_backend = (_env("STORAGE_BACKEND", "auto") or "auto").strip().lower()
     public_endpoint = _env("OSS_PUBLIC_ENDPOINT", "").strip()
     if site_role == "dev":
-        backend_ok = storage_backend in ("oss", "cdn")
-        backend_label = "传输后端允许 oss/cdn（开发环境）"
-        backend_hint = "开发环境用自家 CDN 时设 STORAGE_BACKEND=cdn；正式线必须 oss"
-        endpoint_ok = not public_endpoint or ".aliyuncs.com" in public_endpoint or "lovesun" in public_endpoint
-        endpoint_label = "OSS 公网域名（开发可自有 CDN）"
-        endpoint_hint = "开发环境 OSS_PUBLIC_ENDPOINT 可为自家 CDN 域名"
+        checks.append(_check("backend_policy", "传输必须自家 CDN（dev）",
+                             storage_backend == "cdn", storage_backend,
+                             "开发环境只能 STORAGE_BACKEND=cdn，禁止 oss"))
+        checks.append(_check("oss_forbidden", "开发环境禁止配置阿里 OSS 凭据",
+                             not oss_configured,
+                             "已配置" if oss_configured else "未配置",
+                             "环境隔离：开发机不得持有生产 OSS 凭据（避免污染生产 bucket）"))
+        checks.append(_check("oss_endpoint", "开发 OSS 公网域名不得为阿里域名",
+                             not public_endpoint or "aliyuncs.com" not in public_endpoint,
+                             public_endpoint or "未配置",
+                             "dev 的 OSS_PUBLIC_ENDPOINT 不应指向阿里 OSS"))
     else:
-        backend_ok = storage_backend == "oss"
-        backend_label = "传输强制阿里 OSS（STORAGE_BACKEND=oss）"
-        backend_hint = "正式线必须 STORAGE_BACKEND=oss；auto 在缺 OSS 凭据时会回退 cdn"
-        # 生产：OSS_PUBLIC_ENDPOINT 若指向非阿里官方域名（如自家 cdn）则阻断
-        endpoint_ok = not public_endpoint or ".aliyuncs.com" in public_endpoint
-        endpoint_label = "OSS 公网域名仅限阿里官方"
-        endpoint_hint = "正式线 OSS_PUBLIC_ENDPOINT 必须为 .aliyuncs.com"
-    checks.append(_check("transfer_oss", backend_label, backend_ok,
-                         f"{storage_backend} (SITE_ROLE={site_role})", backend_hint))
-    checks.append(_check("oss_endpoint", endpoint_label, endpoint_ok,
-                         public_endpoint or "默认 bucket.endpoint", endpoint_hint))
+        checks.append(_check("backend_policy", "传输强制阿里 OSS（prod）",
+                             storage_backend == "oss", storage_backend,
+                             "正式线必须 STORAGE_BACKEND=oss；auto/cdn 都会走到非 OSS 路径"))
+        checks.append(_check("oss_endpoint", "OSS 公网域名仅限阿里官方",
+                             not public_endpoint or ".aliyuncs.com" in public_endpoint,
+                             public_endpoint or "默认 bucket.endpoint",
+                             "正式线 OSS_PUBLIC_ENDPOINT 必须为 .aliyuncs.com，禁止自家 CDN"))
 
     # WORKER_TOKEN（生产必须为非空强令牌）
     token = _env("WORKER_TOKEN")
