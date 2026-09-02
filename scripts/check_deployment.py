@@ -137,6 +137,19 @@ def check_control() -> list[dict]:
                          _env("OSS_BUCKET") or "未设置",
                          "OSS_ACCESS_KEY_ID/SECRET/BUCKET 三者须齐备"))
 
+    # 传输锁定：正式线必须走阿里 OSS，禁止自家 CDN 回退
+    storage_backend = _env("STORAGE_BACKEND", "auto")
+    oss_ok = storage_backend == "oss"
+    public_endpoint = _env("OSS_PUBLIC_ENDPOINT", "")
+    # OSS_PUBLIC_ENDPOINT 若指向非阿里官方域名（如自家 cdn）则阻断
+    aliyun_ok = not public_endpoint or ".aliyuncs.com" in public_endpoint or public_endpoint.endswith(".aliyuncs.com")
+    checks.append(_check("transfer_oss", "传输强制阿里 OSS（STORAGE_BACKEND=oss）", oss_ok,
+                         storage_backend,
+                         "正式线必须 STORAGE_BACKEND=oss；auto 在缺 OSS 凭据时会回退 cdn"))
+    checks.append(_check("oss_endpoint", "OSS 公网域名仅限阿里官方", aliyun_ok,
+                         public_endpoint or "默认 bucket.endpoint",
+                         "OSS_PUBLIC_ENDPOINT 若指向自家 CDN/自定义域名需确认"))
+
     # WORKER_TOKEN（生产必须为非空强令牌）
     token = _env("WORKER_TOKEN")
     token_ok = bool(token) and token != "change-me-to-a-long-random-token"
