@@ -69,6 +69,33 @@ def _blender_bin(local: Path) -> Path:
     return local / "blender" / "blender"
 
 
+def _detect_caps(local: Path) -> dict[str, bool]:
+    """按 server.agent 同款路径探测本机能力，用于判定「调度器能否把任务派给本机」。
+
+    与 server/agent.py:_capabilities() 的判定保持一致，保证 agent 上报
+    的能力 = 这里检测到的能力，避免「节点在线但能力对不上 → 任务永远卡 queued」。
+    """
+    win = os.name == "nt"
+    py = _python_bin(local)
+    blender = _blender_bin(local)
+    model = local / "Hunyuan3D-2.1-model"
+    mv_model = local / "Hunyuan3D-2mv-model-v2"
+    runner = ROOT / "pipeline" / "run_hunyuan_yoyo.py"
+    mv_runner = ROOT / "pipeline" / "run_hunyuan_multiview.py"
+    renderer = ROOT / "pipeline" / "blender_render_job.py"
+    refiner = ROOT / "pipeline" / "blender_auto_refine.py"
+    stl = ROOT / "pipeline" / "blender_export_stl.py"
+    return {
+        "hunyuan3d": bool(py.exists()) and runner.exists() and (model / "hunyuan3d-dit-v2-1" / "model.fp16.ckpt").exists(),
+        "hunyuan3dMultiview": bool(py.exists()) and mv_runner.exists() and (mv_model / "hunyuan3d-dit-v2-mv" / "model.fp16.safetensors").exists(),
+        "sf3d": False,
+        "triposr": False,
+        "blender": blender.exists() and renderer.exists(),
+        "blenderRefinement": blender.exists() and refiner.exists(),
+        "blenderStlExport": blender.exists() and stl.exists(),
+    }
+
+
 def _run(cmd: list[str], timeout: int = 30) -> tuple[int, str]:
     try:
         p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
@@ -253,15 +280,21 @@ def check_node() -> list[dict]:
     checks.append(_check("hunyuan_cfg", "DiT config.yaml", dit_cfg.exists(),
                          "存在" if dit_cfg.exists() else "缺失", str(dit_cfg)))
 
-    # Hunyuan3D-2mv 权重（可选，多视图用）
+    # Hunyuan3D-2mv 权重（多视图）。标准 GPU 节点必须具备，否则三视图任务
+    # 会被调度器永久跳过（worker 不静默降级）。NODE_EXPECT_MV=0 显式豁免。
+    expect_mv = _env("NODE_EXPECT_MV", "1") != "0"
     mv = local / "Hunyuan3D-2mv-model-v2" / "hunyuan3d-dit-v2-mv" / "model.fp16.safetensors"
     if mv.exists():
         sz = mv.stat().st_size
-        checks.append(_check("hunyuan_mv", "Hunyuan3D-2mv 权重", sz == HUNYUAN_MV_EXPECTED_BYTES,
-                             _fmt_bytes(sz), "完整" if sz == HUNYUAN_MV_EXPECTED_BYTES else "大小不符"))
+        mv_ok = sz == HUNYUAN_MV_EXPECTED_BYTES
+        checks.append(_check("hunyuan_mv", "Hunyuan3D-2mv 权重", mv_ok,
+                             _fmt_bytes(sz), "完整" if mv_ok else "大小不符，应约 4.6GB"))
+    elif expect_mv:
+        checks.append(_check("hunyuan_mv", "Hunyuan3D-2mv 权重（节点必需）", False,
+                             "未安装", "多视图（front+side+back）任务需要；缺失会卡 queued"))
     else:
-        checks.append(_check("hunyuan_mv", "Hunyuan3D-2mv 权重（可选）", True,
-                             "未安装", "多视图生成才需要"))
+        checks.append(_check("hunyuan_mv", "Hunyuan3D-2mv 权重（NODE_EXPECT_MV=0 豁免）", True,
+                             "未安装", "已显式豁免多视图能力"))
 
     # Blender
     blender = _blender_bin(local)
@@ -292,6 +325,32 @@ def check_node() -> list[dict]:
     u2net = Path.home() / ".u2net" / "u2net.onnx"
     checks.append(_check("rembg", "rembg 背景移除模型 u2net.onnx", u2net.exists(),
                          _fmt_bytes(u2net.stat().st_size) if u2net.exists() else "缺失", str(u2net)))
+
+    # 能力矩阵：与 agent 上报一致，明确「调度器能把什么任务派到本机」
+    caps = _detect_caps(local)
+    for key, label in (
+        ("hunyuan3d", "能力 hunyuan3d（单图生成）"),
+        ("hunyuan3dMultiview", "能力 hunyuan3dMultiview（多视图）"),
+        ("blender", "能力 blender（四视图渲染）"),
+        ("blenderRefinement", "能力 blenderRefinement（精修）"),
+        ("blenderStlExport", "能力 blenderStlExport（STL 导出）"),
+    ):
+        if key == "hunyuan3dMultiview" and not expect_mv:
+            checks.append(_check(f"cap:{key}", label, True, "豁免（NODE_EXPECT_MV=0）",
+                                 "显式豁免多视图；多视图任务不会派发到本机"))
+            continue
+        checks.append(_check(f"cap:{key}", label, caps.get(key, False),
+                             "具备" if caps.get(key, False) else "缺失",
+                             "agent 会上报此能力；缺失则该类任务无法派发到本机"))
+    # 调度可用性摘要：能接哪些任务
+    can_multi = bool(caps.get("hunyuan3d") and caps.get("hunyuan3dMultiview"))
+    can_single = bool(caps.get("hunyuan3d"))
+    if expect_mv:
+        checks.append(_check("sched_ready", "可接收多视图任务（hunyuan3d+2mv）", can_multi,
+                             "可" if can_multi else "否",
+                             "三视图素材任务需要 2mv；否则在控制面永久 queued"))
+    checks.append(_check("sched_single", "可接收单图任务（hunyuan3d）", can_single,
+                         "可" if can_single else "否", "仅 front 素材的任务需要 hunyuan3d"))
 
     return checks
 
