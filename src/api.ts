@@ -319,6 +319,10 @@ export const api = {
   printerProbe: (id: string) => fetch(`/api/printer/printers/${id}/probe`, { method: "POST" }).then(json<{ok:boolean;status?:PrinterStatus}>),
   printerToggle: (id: string) => fetch(`/api/printer/printers/${id}/toggle`, { method: "POST" }).then(json<Printer>),
   printJobs: () => fetch("/api/print/jobs").then(json<Record<string, unknown>[]>),
+  settings: () => fetch("/api/settings").then(json<SiteSettings>),
+  saveSettings: (values: Record<string, string>) =>
+    fetch("/api/settings", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ values }) }).then(json<SiteSettings>),
+  siteInfo: () => fetch("/api/system/site").then(json<SiteInfo>),
   printJobCreate: (body: unknown) => fetch("/api/print/jobs", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }).then(json<Record<string, unknown>>),
   printJobUploadModel: (id: string, file: File) => { const f=new FormData();f.append("file",file);return fetch(`/api/print/jobs/${id}/model`,{method:"POST",body:f}).then(json<Record<string, unknown>>); },
   printJobSplit: (id: string, body: unknown) => fetch(`/api/print/jobs/${id}/split`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }).then(json<Record<string, unknown>>),
@@ -330,3 +334,6 @@ export const api = {
 };
 
 export type AuthUser={authenticated:true;sub:string;name:string;email:string;role:'admin'|'user';groups:string[];adminGroup?:string;userGroup?:string};
+export interface SiteSettingEntry { key:string; group:string; label:string; hint:string; sensitive:boolean; secret:boolean; value:string; }
+export interface SiteSettings { entries: SiteSettingEntry[]; values: Record<string,string>; }
+export interface SiteInfo { name:string; publicBaseUrl:string; authDisabled:boolean; }

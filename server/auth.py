@@ -75,7 +75,7 @@ def requires_admin(path:str,method:str)->bool:
     # GPU 与打印机注册表包含 SSH key、IP、access code，全部仅管理员可见。
     if path.startswith('/api/gpu') or path.startswith('/api/printer'):return True
     # AutoDL 实例生命周期（开机/关机）与存储配置状态仅管理员可见。
-    if path.startswith('/api/autodl') or path=='/api/system/storage':return True
+    if path.startswith('/api/autodl') or path.startswith('/api/settings') or path=='/api/system/storage':return True
     if path.startswith('/api/print/') and method in {'DELETE'}:return True
     return False
 

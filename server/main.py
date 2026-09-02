@@ -43,8 +43,8 @@ async def lifespan(_:FastAPI):
 
 app=FastAPI(title='2D→3D Studio API',version='1.0.0',docs_url='/api/docs',openapi_url='/api/openapi.json',lifespan=lifespan)
 mimetypes.add_type('model/gltf-binary','.glb')
-_cors=os.environ.get('CORS_ORIGINS','http://localhost:5173,http://127.0.0.1:5173')
-app.add_middleware(CORSMiddleware,allow_origins=[o.strip() for o in _cors.split(',') if o.strip()],allow_credentials=True,allow_methods=['*'],allow_headers=['*'])
+from . import settings as site_settings
+app.add_middleware(CORSMiddleware,allow_origins=site_settings.cors_origins(),allow_credentials=True,allow_methods=['*'],allow_headers=['*'])
 
 @app.middleware('http')
 async def authentication_boundary(request:Request,call_next):
@@ -226,6 +226,29 @@ def storage_status():
             'configured': autodl.configured(),
             'apiBase': autodl.AUTODL_API_BASE,
         },
+    }
+
+class SettingsInput(BaseModel):
+    values: dict[str, str] = {}
+
+@app.get('/api/settings')
+def get_site_settings():
+    """站点配置目录（仅管理员；敏感默认值不回显）。"""
+    return {'entries': site_settings.catalog_entries(admin=True), 'values': site_settings.current_all()}
+
+@app.put('/api/settings')
+def put_site_settings(body: SettingsInput):
+    """保存站点配置覆盖（仅管理员）。空值=恢复 env/默认。"""
+    site_settings.update(body.values)
+    return {'entries': site_settings.catalog_entries(admin=True), 'values': site_settings.current_all()}
+
+@app.get('/api/system/site')
+def site_info():
+    """公开站点信息（落地页/登录页可用的最小公开配置）。"""
+    return {
+        'name': site_settings.current('site.name'),
+        'publicBaseUrl': site_settings.current('site.publicBaseUrl'),
+        'authDisabled': site_settings.current('auth.disabled').lower() in ('1', 'true', 'yes'),
     }
 
 @app.get('/api/system/health')

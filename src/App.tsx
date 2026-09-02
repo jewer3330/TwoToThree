@@ -21,6 +21,7 @@ import PartsComparePage from './pages/PartsComparePage';
 import GpuConsolePage from './pages/GpuConsolePage';
 import PrinterConsolePage from './pages/PrinterConsolePage';
 import PrintWorkflowPage from './pages/PrintWorkflowPage';
+import SettingsPage from './pages/SettingsPage';
 import LandingPage from './pages/LandingPage';
 
 // 后台功能可见性：管理员组由后端 /me 返回（按 OIDC 用户组判定，非硬编码 role）。
@@ -70,7 +71,7 @@ function Shell({user}:{user:AuthUser}){const loc=useLocation(); const focused=/\
     <Route path="/parts-lab/assembly/:partId" element={<PartsAssemblyPage/>}/>
     <Route path="/parts-lab/compare/:partId" element={<PartsComparePage/>}/>
     <Route path="/parts-lab/*" element={<PartsLabPage/>}/>
-    <Route path="/projects" element={<Dashboard/>}/><Route path="/assets" element={<Placeholder title="素材管理"/>}/><Route path="/queue" element={<Placeholder title="任务队列"/>}/><Route path="/gpu" element={isAdmin(user)?<GpuConsolePage/>:<Navigate to="/"/>}/><Route path="/printer" element={isAdmin(user)?<PrinterConsolePage/>:<Navigate to="/"/>}/><Route path="/print-workflow" element={<PrintWorkflowPage/>}/><Route path="/library" element={<Placeholder title="模型 / 资产库"/>}/><Route path="/settings" element={isAdmin(user)?<Placeholder title="系统设置"/>:<Navigate to="/"/>}/><Route path="*" element={<Navigate to="/"/>}/>
+    <Route path="/projects" element={<Dashboard/>}/><Route path="/assets" element={<Placeholder title="素材管理"/>}/><Route path="/queue" element={<Placeholder title="任务队列"/>}/><Route path="/gpu" element={isAdmin(user)?<GpuConsolePage/>:<Navigate to="/"/>}/><Route path="/printer" element={isAdmin(user)?<PrinterConsolePage/>:<Navigate to="/"/>}/><Route path="/print-workflow" element={<PrintWorkflowPage/>}/><Route path="/library" element={<Placeholder title="模型 / 资产库"/>}/><Route path="/settings" element={isAdmin(user)?<SettingsPage/>:<Navigate to="/"/>}/><Route path="*" element={<Navigate to="/"/>}/>
   </Routes></main></section>
 </div>}
 export default function App(){const [user,setUser]=useState<AuthUser|null|undefined>(undefined);useEffect(()=>{api.me().then(setUser).catch(()=>setUser(null))},[]);if(location.pathname==='/login')return <LoginPage/>;if(user===undefined)return <div className="empty"><Activity/><p>正在验证登录状态…</p></div>;if(!user)return <LandingPage/>;return <Shell user={user}/>}
