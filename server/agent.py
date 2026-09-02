@@ -271,7 +271,12 @@ class Agent:
 
     async def _upload_file(self,upload_id:str,path:str,timeout:int):
         """把本地文件 POST 回控制面收件端点。"""
-        import httpx
+        try:
+            import httpx
+        except ImportError:
+            await self._send({'type':'upload_done','uploadId':upload_id,'ok':False,
+                              'error':'节点缺少 httpx 依赖，无法回传产物'})
+            return
         try:
             url=f'{CONTROL_URL}/api/gpu/selfreg/upload/{upload_id}'
             headers={'X-Worker-Token':WORKER_TOKEN} if WORKER_TOKEN else {}
@@ -288,7 +293,13 @@ class Agent:
 
     async def _fetch_files(self,fetch_id:str,marker:str,files:list[str],dest_dir:str):
         """从控制面 pullbox 拉取输入文件到节点本地 dest_dir。"""
-        import httpx
+        try:
+            import httpx
+        except ImportError:
+            print('[agent] fetch error: 节点缺少 httpx 依赖')
+            await self._send({'type':'fetch_done','fetchId':fetch_id,'ok':False,
+                              'error':'节点缺少 httpx 依赖，无法拉取输入'})
+            return
         try:
             os.makedirs(dest_dir, exist_ok=True)
             headers={'X-Worker-Token':WORKER_TOKEN} if WORKER_TOKEN else {}
