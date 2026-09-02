@@ -137,18 +137,31 @@ def check_control() -> list[dict]:
                          _env("OSS_BUCKET") or "未设置",
                          "OSS_ACCESS_KEY_ID/SECRET/BUCKET 三者须齐备"))
 
-    # 传输锁定：正式线必须走阿里 OSS，禁止自家 CDN 回退
-    storage_backend = _env("STORAGE_BACKEND", "auto")
-    oss_ok = storage_backend == "oss"
-    public_endpoint = _env("OSS_PUBLIC_ENDPOINT", "")
-    # OSS_PUBLIC_ENDPOINT 若指向非阿里官方域名（如自家 cdn）则阻断
-    aliyun_ok = not public_endpoint or ".aliyuncs.com" in public_endpoint or public_endpoint.endswith(".aliyuncs.com")
-    checks.append(_check("transfer_oss", "传输强制阿里 OSS（STORAGE_BACKEND=oss）", oss_ok,
-                         storage_backend,
-                         "正式线必须 STORAGE_BACKEND=oss；auto 在缺 OSS 凭据时会回退 cdn"))
-    checks.append(_check("oss_endpoint", "OSS 公网域名仅限阿里官方", aliyun_ok,
-                         public_endpoint or "默认 bucket.endpoint",
-                         "OSS_PUBLIC_ENDPOINT 若指向自家 CDN/自定义域名需确认"))
+    # 传输策略区分环境角色：
+    #   prod（默认，最严格）——正式线必须 STORAGE_BACKEND=oss（阿里 OSS），禁止自家 CDN 回退
+    #   dev —— 开发环境允许自家 CDN（STORAGE_BACKEND=cdn），不强制 OSS
+    site_role = (_env("SITE_ROLE", "prod") or "prod").strip().lower()
+    storage_backend = (_env("STORAGE_BACKEND", "auto") or "auto").strip().lower()
+    public_endpoint = _env("OSS_PUBLIC_ENDPOINT", "").strip()
+    if site_role == "dev":
+        backend_ok = storage_backend in ("oss", "cdn")
+        backend_label = "传输后端允许 oss/cdn（开发环境）"
+        backend_hint = "开发环境用自家 CDN 时设 STORAGE_BACKEND=cdn；正式线必须 oss"
+        endpoint_ok = not public_endpoint or ".aliyuncs.com" in public_endpoint or "lovesun" in public_endpoint
+        endpoint_label = "OSS 公网域名（开发可自有 CDN）"
+        endpoint_hint = "开发环境 OSS_PUBLIC_ENDPOINT 可为自家 CDN 域名"
+    else:
+        backend_ok = storage_backend == "oss"
+        backend_label = "传输强制阿里 OSS（STORAGE_BACKEND=oss）"
+        backend_hint = "正式线必须 STORAGE_BACKEND=oss；auto 在缺 OSS 凭据时会回退 cdn"
+        # 生产：OSS_PUBLIC_ENDPOINT 若指向非阿里官方域名（如自家 cdn）则阻断
+        endpoint_ok = not public_endpoint or ".aliyuncs.com" in public_endpoint
+        endpoint_label = "OSS 公网域名仅限阿里官方"
+        endpoint_hint = "正式线 OSS_PUBLIC_ENDPOINT 必须为 .aliyuncs.com"
+    checks.append(_check("transfer_oss", backend_label, backend_ok,
+                         f"{storage_backend} (SITE_ROLE={site_role})", backend_hint))
+    checks.append(_check("oss_endpoint", endpoint_label, endpoint_ok,
+                         public_endpoint or "默认 bucket.endpoint", endpoint_hint))
 
     # WORKER_TOKEN（生产必须为非空强令牌）
     token = _env("WORKER_TOKEN")
