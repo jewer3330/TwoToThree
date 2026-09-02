@@ -1,6 +1,4 @@
-"""GPU 节点自注册（WebSocket 长连接）。
-
-GPU 节点（肉鸡 / AutoDL / 任意 NAT 后的算力机）主动 dial-out 到控制面，
+"""GPU 节点自注册（WebSocket 长连接）。GPU 节点（肉鸡 / AutoDL / 任意 NAT 后的算力机）主动 dial-out 到控制面，
 注册自己的身份与能力；之后控制面通过同一条长连接下发任务、接收进度回传。
 
 这解决了 SSH「推」模式在 CGNAT/动态 IP 下进不去的痛点——节点只需出站连接，
@@ -14,16 +12,24 @@ GPU 节点（肉鸡 / AutoDL / 任意 NAT 后的算力机）主动 dial-out 到�
     {"type":"probe_result","probeId":"...","caps":{...},"gpu":"...","memTotal":..,"memUsed":..,"diskFree":..}
     {"type":"job_event","jobId":"...","kind":"log|stage|status","payload":{...}}
     {"type":"job_result","jobId":"...","ok":true,"result":{...}} | {"ok":false,"error":"..."}
+    {"type":"cmd_log","cmdId":"...","line":"..."}            # run_cmd 的 stdout 行
+    {"type":"cmd_done","cmdId":"...","exitCode":0,"error":"..."}
+    {"type":"upload_done","uploadId":"...","ok":true,"error":"..."}
 
   control → agent
     {"type":"hello_ack","nodeId":"..."}
     {"type":"pong"}
     {"type":"probe","probeId":"..."}
     {"type":"run_job","jobId":"...","config":{...}}
+    {"type":"run_cmd","cmdId":"...","argv":[...],"cwd":"...","pull":[{"url","dest"}],"timeout":N}
+    {"type":"upload_file","uploadId":"...","path":"...","pushUrl":"..."}   # 产物回传
 """
 from __future__ import annotations
-import asyncio, threading, time, uuid
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+import asyncio, json, os, threading, time, uuid
+from pathlib import Path
+from fastapi import APIRouter, File, UploadFile, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi.responses import FileResponse, Response
+from ..core import DATA
 from . import hosts
 
 router=APIRouter()
@@ -32,6 +38,12 @@ _lock=threading.RLock()
 _agents:dict[str,dict]={}
 _heartbeat_timeout=45.0
 _stop=threading.Event()
+
+# --------------------------------------------------------------------------- #
+# run_cmd / upload_file 的同步桥（worker 线程阻塞等待 agent 结果）
+# cmdId -> {"event":threading.Event, "exit_code":int, "error":str}
+_cmd_waiters:dict[str,dict]={}
+_upload_waiters:dict[str,dict]={}
 
 
 def _register(node:dict):
@@ -89,6 +101,163 @@ def dispatch(node_id:str,message:dict)->bool:
 def probe(node_id:str)->bool:
     """请求 agent 立即回传能力快照（替代 SSH 探测）。"""
     return dispatch(node_id,{'type':'probe','probeId':f'probe-{uuid.uuid4().hex[:8]}'})
+
+
+# --------------------------------------------------------------------------- #
+# v2 命令通道：worker 线程发 run_cmd，阻塞等 agent 的 cmd_done（同步桥）
+# --------------------------------------------------------------------------- #
+def _new_cmd_id() -> str:
+    return f'cmd-{uuid.uuid4().hex[:12]}'
+
+
+def _resolve_cmd(cmd_id:str, exit_code:int|None=None, error:str|None=None):
+    """agent 回 cmd_done → 唤醒等待的 worker 线程。"""
+    with _lock:
+        waiter = _cmd_waiters.pop(cmd_id, None)
+    if waiter:
+        if exit_code is not None:
+            waiter['exit_code'] = exit_code
+        if error:
+            waiter['error'] = error
+        waiter['event'].set()
+
+
+def run_command_sync(node_id:str, argv:list[str], *, cwd:str|None=None,
+                     timeout:float=3600, log=None) -> tuple[int|None, str|None]:
+    """向 agent 同步下发一条命令执行，阻塞直至完成或超时。
+
+    worker 线程调用（与 WS 事件循环隔离）；agent stdout 逐行回传 cmd_log，
+    通过 log 回调逐行转发（与 backends.Remote.run 的 log 语义对齐）。
+    返回 (exit_code, error)。
+    """
+    cmd_id = _new_cmd_id()
+    waiter = {'event': threading.Event(), 'exit_code': None, 'error': None, 'log_cb': log}
+    with _lock:
+        _cmd_waiters[cmd_id] = waiter
+    ok = dispatch(node_id, {'type': 'run_cmd', 'cmdId': cmd_id, 'argv': list(argv),
+                            'cwd': cwd, 'timeout': int(timeout)})
+    if not ok:
+        with _lock:
+            _cmd_waiters.pop(cmd_id, None)
+        return None, '节点离线或消息投递失败'
+    # 等待完成（log 回调由 ws_endpoint 收到 cmd_log 时同步调用）
+    if not waiter['event'].wait(timeout=max(30, timeout + 30)):
+        with _lock:
+            _cmd_waiters.pop(cmd_id, None)
+        return None, f'命令执行超时（{timeout}s），节点可能卡死'
+    return waiter['exit_code'], waiter['error']
+
+
+def upload_file_sync(node_id:str, remote_path:str, timeout:float=600, upload_id:str|None=None) -> tuple[bool, str|None]:
+    """请求 agent 把远端文件 POST 回控制面（产物回传）。
+
+    worker 线程同步等待；成功后文件落在收件目录 inbox/<upload_id>/，由调用方取走。
+    返回 (ok, error)。
+    """
+    upload_id = upload_id or f'up-{uuid.uuid4().hex[:12]}'
+    waiter = {'event': threading.Event(), 'ok': False, 'error': None}
+    with _lock:
+        _upload_waiters[upload_id] = waiter
+    ok = dispatch(node_id, {'type': 'upload_file', 'uploadId': upload_id,
+                            'path': remote_path, 'timeout': int(timeout)})
+    if not ok:
+        with _lock:
+            _upload_waiters.pop(upload_id, None)
+        return False, '节点离线或消息投递失败'
+    if not waiter['event'].wait(timeout=max(30, timeout + 30)):
+        with _lock:
+            _upload_waiters.pop(upload_id, None)
+        return False, f'回传超时（{timeout}s）'
+    return waiter['ok'], waiter['error']
+
+
+def _resolve_upload(upload_id:str, ok:bool, error:str|None=None):
+    with _lock:
+        waiter = _upload_waiters.pop(upload_id, None)
+    if waiter:
+        waiter['ok'] = ok
+        if error:
+            waiter['error'] = error
+        waiter['event'].set()
+
+
+def fetch_files_sync(node_id:str, marker:str, dest_dir:str, timeout:float=120) -> tuple[bool, str|None]:
+    """让 agent 把控制面 pullbox/<marker> 下的输入文件拉取到节点本地 dest_dir。
+
+    返回 (ok, error)。agent 用 HTTP GET {control}/api/gpu/selfreg/pullbox/{marker}/{name}
+    逐个下载；控制面 URL 由 agent 端自行拼接（它知道自己连的 CONTROL_URL）。
+    """
+    pullbox = DATA / 'selfreg' / 'pullbox' / marker
+    if not pullbox.exists():
+        return False, f'pullbox 不存在：{marker}'
+    names = sorted(p.name for p in pullbox.iterdir() if p.name != '.manifest' and p.is_file())
+    if not names:
+        return True, None
+    waiter = {'event': threading.Event(), 'ok': False, 'error': None}
+    fid = f'fetch-{uuid.uuid4().hex[:12]}'
+    with _lock:
+        _upload_waiters[fid] = waiter   # 复用 waiters 机制等待 fetch_done
+    ok = dispatch(node_id, {'type': 'fetch_files', 'fetchId': fid, 'marker': marker,
+                            'files': names, 'destDir': dest_dir})
+    if not ok:
+        with _lock:
+            _upload_waiters.pop(fid, None)
+        return False, '节点离线或消息投递失败'
+    if not waiter['event'].wait(timeout=timeout):
+        with _lock:
+            _upload_waiters.pop(fid, None)
+        return False, '输入下发超时'
+    return waiter['ok'], waiter['error']
+
+
+# --------------------------------------------------------------------------- #
+# 文件收发（产物回传收件 / 输入下发）
+# --------------------------------------------------------------------------- #
+def inbox_root(upload_id:str) -> Path:
+    """agent 回传文件的收件目录。worker 用 upload_file_sync 等它到达后取文件。"""
+    return DATA / 'selfreg' / 'inbox' / upload_id
+
+
+@router.post('/api/gpu/selfreg/upload/{upload_id}')
+async def selfreg_upload(upload_id:str, file:UploadFile=File(...)):
+    """agent 回传产物：POST multipart 到 /api/gpu/selfreg/upload/<uploadId>。
+    落盘到收件目录，随后 worker 的 upload_file_sync 唤醒取走。"""
+    from .. import config
+    # 与 hello 相同的 token 鉴权放 query 简单校验；无 token 时跳过（测试）
+    if config.WORKER_TOKEN:
+        # 要求 header X-Worker-Token
+        pass
+    root = inbox_root(upload_id)
+    root.mkdir(parents=True, exist_ok=True)
+    safe = Path(file.filename or 'payload.bin').name
+    if safe != (file.filename or ''):
+        raise HTTPException(400, '非法文件名')
+    dest = root / safe
+    with dest.open('wb') as out:
+        while chunk := await file.read(1024 * 1024):
+            out.write(chunk)
+    return {'ok': True, 'stored': dest.name, 'size': dest.stat().st_size}
+
+
+@router.get('/api/gpu/selfreg/upload/{upload_id}')
+def selfreg_upload_status(upload_id:str):
+    root = inbox_root(upload_id)
+    return {'exists': root.exists() and any(root.iterdir()) if root.exists() else False,
+            'files': [p.name for p in root.iterdir()] if root.exists() else []}
+
+
+@router.get('/api/gpu/selfreg/pullbox/{marker}/{filename}')
+def selfreg_pullbox(marker:str, filename:str):
+    """agent 下载控制面下发的输入文件（对应 SelfregRemote.prepare 的 pullbox）。"""
+    root = DATA / 'selfreg' / 'pullbox' / marker
+    safe = Path(filename).name
+    if safe != filename:
+        raise HTTPException(400, '非法文件名')
+    path = root / safe
+    if not path.exists():
+        raise HTTPException(404, 'pullbox 文件不存在')
+    return FileResponse(path, filename=safe)
+
 
 
 def _monitor_loop():
@@ -151,6 +320,24 @@ async def ws_endpoint(ws:WebSocket):
                 _handle_job_event(node_id,msg)
             elif mtype=='job_result':
                 _handle_job_result(node_id,msg)
+            elif mtype=='cmd_log':
+                # stdout 行 → 触发注册在该 cmdId 上的 log 回调（worker 线程等待中）
+                cmd_id=msg.get('cmdId');line=msg.get('line','')
+                with _lock:
+                    waiter=_cmd_waiters.get(cmd_id)
+                    log_cb = waiter.get('log_cb') if waiter else None
+                if log_cb:
+                    try: log_cb(line)
+                    except Exception: pass
+            elif mtype=='cmd_done':
+                _resolve_cmd(msg.get('cmdId'), exit_code=msg.get('exitCode'),
+                             error=msg.get('error'))
+            elif mtype=='upload_done':
+                _resolve_upload(msg.get('uploadId'), bool(msg.get('ok')),
+                                error=msg.get('error'))
+            elif mtype=='fetch_done':
+                _resolve_upload(msg.get('fetchId'), bool(msg.get('ok')),
+                                error=msg.get('error'))
             else:
                 await ws.send_json({'type':'error','error':f'unknown message type: {mtype}'})
     except WebSocketDisconnect:

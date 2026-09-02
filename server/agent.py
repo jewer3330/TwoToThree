@@ -50,6 +50,16 @@ def _ws_url()->str:
     return f'{scheme}://{rest}/api/gpu/ws'
 
 
+def _work_root()->Path:
+    """节点本地工作根：run_cmd 的默认 cwd 与 selfreg-stage 目录所在。"""
+    default=Path.home()/'AIData'/'3d'/'work'
+    if os.name=='nt':
+        default=Path(os.environ.get('SYSTEMDRIVE','D:'))/'print3d'/'work'
+    p=Path(_env('AGENT_WORK',str(default))).expanduser()
+    p.mkdir(parents=True,exist_ok=True)
+    return p
+
+
 def _gpu_snapshot()->tuple[str|None,int|None,int|None]:
     """读取本机 GPU 型号与显存（无 nvidia-smi 时返回空）。"""
     try:
@@ -127,6 +137,7 @@ def hello_message()->dict:
             'maxConcurrentJobs':AGENT_MAX_JOBS,
             'labels':[],
             'os':'linux' if os.name!='nt' else 'windows',
+            'workDir':str(_work_root()),
         },
     }
 
@@ -155,6 +166,23 @@ def _run_job(job_id:str,config:dict)->dict:
         return {'ok':False,'error':str(exc)[:500]}
 
 
+# --------------------------------------------------------------------------- #
+# v2：命令执行（控制面经 WS 下发 argv，节点本地 subprocess 跑，逐行回传）
+# --------------------------------------------------------------------------- #
+def _run_command(argv:list[str], cwd:str|None, log_line, timeout:int):
+    """同步执行 argv 并逐行 log。返回 (exit_code, error)。"""
+    import subprocess
+    proc=subprocess.Popen(argv,cwd=cwd,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,
+                          text=True,encoding='utf-8',errors='replace',bufsize=1)
+    assert proc.stdout
+    for line in proc.stdout:
+        line=line.rstrip('\n')
+        if line and ('%|' not in line or '100%' in line):
+            log_line(line)
+    proc.wait(timeout=timeout)
+    return proc.returncode, None
+
+
 class Agent:
     def __init__(self):
         self.loop:asyncio.AbstractEventLoop|None=None
@@ -179,6 +207,26 @@ class Agent:
                 config=msg.get('config') or {}
                 print(f'[agent] 收到任务 {job_id}')
                 asyncio.create_task(self._execute(job_id,config))
+            elif mtype=='run_cmd':
+                cmd_id=msg.get('cmdId','')
+                argv=msg.get('argv') or []
+                cwd=msg.get('cwd')
+                timeout=int(msg.get('timeout') or 3600)
+                print(f'[agent] run_cmd {cmd_id}: {argv[:2]}...')
+                asyncio.create_task(self._run_cmd(cmd_id,argv,cwd,timeout))
+            elif mtype=='fetch_files':
+                fetch_id=msg.get('fetchId','')
+                marker=msg.get('marker','')
+                files=list(msg.get('files') or [])
+                dest_dir=msg.get('destDir') or ''
+                print(f'[agent] fetch_files {fetch_id}: {len(files)} 个 -> {dest_dir}')
+                asyncio.create_task(self._fetch_files(fetch_id,marker,files,dest_dir))
+            elif mtype=='upload_file':
+                upload_id=msg.get('uploadId','')
+                path=msg.get('path','')
+                timeout=int(msg.get('timeout') or 600)
+                print(f'[agent] upload_file {upload_id}: {path}')
+                asyncio.create_task(self._upload_file(upload_id,path,timeout))
             elif mtype=='hello_ack':
                 print(f"[agent] 注册成功，nodeId={msg.get('nodeId')}")
             elif mtype=='error':
@@ -191,6 +239,53 @@ class Agent:
         result['type']='job_result'
         result['jobId']=job_id
         await self._send(result)
+
+    async def _run_cmd(self,cmd_id:str,argv:list[str],cwd:str|None,timeout:int):
+        def log_line(line:str):
+            # 逐行回传，交给控制面线程的 log 回调
+            asyncio.run_coroutine_threadsafe(
+                self._send({'type':'cmd_log','cmdId':cmd_id,'line':line}),
+                self.loop or asyncio.get_running_loop())
+        try:
+            exit_code,error=await asyncio.to_thread(_run_command,argv,cwd,log_line,timeout)
+            await self._send({'type':'cmd_done','cmdId':cmd_id,'exitCode':exit_code,
+                              'error':error})
+        except Exception as exc:
+            await self._send({'type':'cmd_done','cmdId':cmd_id,'exitCode':-1,
+                              'error':str(exc)[:500]})
+
+    async def _upload_file(self,upload_id:str,path:str,timeout:int):
+        """把本地文件 POST 回控制面收件端点。"""
+        import httpx
+        try:
+            url=f'{CONTROL_URL}/api/gpu/selfreg/upload/{upload_id}'
+            with open(path,'rb') as fh:
+                name=os.path.basename(path)
+                r=httpx.post(url,files={'file':(name,fh)},timeout=timeout)
+            ok=r.status_code<300
+            await self._send({'type':'upload_done','uploadId':upload_id,'ok':ok,
+                              'error':None if ok else f'HTTP {r.status_code}'})
+        except Exception as exc:
+            await self._send({'type':'upload_done','uploadId':upload_id,'ok':False,
+                              'error':str(exc)[:500]})
+
+    async def _fetch_files(self,fetch_id:str,marker:str,files:list[str],dest_dir:str):
+        """从控制面 pullbox 拉取输入文件到节点本地 dest_dir。"""
+        import httpx
+        try:
+            os.makedirs(dest_dir, exist_ok=True)
+            for name in files:
+                url=f'{CONTROL_URL}/api/gpu/selfreg/pullbox/{marker}/{name}'
+                resp=httpx.get(url,timeout=300)
+                resp.raise_for_status()
+                target=os.path.join(dest_dir,name)
+                with open(target,'wb') as fh:
+                    fh.write(resp.content)
+                print(f'[agent] fetch {name} ({len(resp.content)} bytes) -> {target}')
+            await self._send({'type':'fetch_done','fetchId':fetch_id,'ok':True})
+        except Exception as exc:
+            await self._send({'type':'fetch_done','fetchId':fetch_id,'ok':False,
+                              'error':str(exc)[:500]})
 
     async def _heartbeat_loop(self):
         while True:
