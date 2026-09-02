@@ -15,7 +15,11 @@ from pathlib import Path
 import torch
 from PIL import Image
 
-from studio_paths import LOCAL_ROOT
+ROOT = Path(__file__).resolve().parents[1]
+# 远程（SSH/selfreg）执行时工作目录不是仓库根，先把它加进 sys.path
+sys.path.insert(0, str(ROOT))
+
+from studio_paths import LOCAL_ROOT  # noqa: E402
 
 try:
     from hy3dgen.rembg import BackgroundRemover
@@ -31,9 +35,6 @@ except ImportError:
             break
     from hy3dgen.rembg import BackgroundRemover
     from hy3dgen.shapegen import Hunyuan3DDiTFlowMatchingPipeline
-
-
-ROOT = Path(__file__).resolve().parents[1]
 
 
 def parse_args() -> argparse.Namespace:
