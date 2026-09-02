@@ -51,9 +51,16 @@ def _ws_url()->str:
 
 
 def _work_root()->Path:
-    """节点本地工作根：run_cmd 的默认 cwd 与 selfreg-stage 目录所在。"""
+    """节点本地工作根：run_cmd 的默认 cwd 与 selfreg-stage 目录所在。
+
+    优先 AGENT_WORK；其次 STUDIO_EXTERNAL_ROOT/work（与 GPU 节点约定布局
+    D:\\print3d\\work 一致）；再退回用户目录/系统盘。目录不存在时创建。
+    """
     default=Path.home()/'AIData'/'3d'/'work'
-    if os.name=='nt':
+    ext=_env('STUDIO_EXTERNAL_ROOT','')
+    if ext:
+        default=Path(ext).expanduser()/'work'
+    elif os.name=='nt':
         default=Path(os.environ.get('SYSTEMDRIVE','D:'))/'print3d'/'work'
     p=Path(_env('AGENT_WORK',str(default))).expanduser()
     p.mkdir(parents=True,exist_ok=True)
@@ -220,7 +227,7 @@ class Agent:
                 argv=msg.get('argv') or []
                 cwd=msg.get('cwd')
                 timeout=int(msg.get('timeout') or 3600)
-                print(f'[agent] run_cmd {cmd_id}: {argv[:2]}...')
+                print(f'[agent] run_cmd {cmd_id}: {" ".join(str(a) for a in argv)[:300]}')
                 asyncio.create_task(self._run_cmd(cmd_id,argv,cwd,timeout))
             elif mtype=='fetch_files':
                 fetch_id=msg.get('fetchId','')
@@ -275,6 +282,7 @@ class Agent:
             await self._send({'type':'upload_done','uploadId':upload_id,'ok':ok,
                               'error':None if ok else f'HTTP {r.status_code}'})
         except Exception as exc:
+            print(f'[agent] upload error: {exc}')
             await self._send({'type':'upload_done','uploadId':upload_id,'ok':False,
                               'error':str(exc)[:500]})
 
@@ -294,6 +302,7 @@ class Agent:
                 print(f'[agent] fetch {name} ({len(resp.content)} bytes) -> {target}')
             await self._send({'type':'fetch_done','fetchId':fetch_id,'ok':True})
         except Exception as exc:
+            print(f'[agent] fetch error: {exc}')
             await self._send({'type':'fetch_done','fetchId':fetch_id,'ok':False,
                               'error':str(exc)[:500]})
 
