@@ -166,14 +166,28 @@ def upload_file_sync(node_id:str, remote_path:str, timeout:float=600, upload_id:
             with _lock:
                 _upload_waiters.pop(upload_id, None)
             last_err = '节点离线或消息投递失败'
-        elif not waiter['event'].wait(timeout=max(30, timeout + 30)):
-            with _lock:
-                _upload_waiters.pop(upload_id, None)
-            last_err = f'回传超时（{timeout}s）'
         else:
-            if waiter['ok']:
+            # WS 通知（upload_done）可能因断线丢失；等待期间周期轮询 inbox——
+            # 只要 agent 的 HTTP POST 已落盘文件即视为成功，不依赖通知。
+            deadline = time.monotonic() + max(30, timeout + 30)
+            done = False
+            while time.monotonic() < deadline:
+                if waiter['event'].wait(min(2.0, max(0.1, deadline - time.monotonic()))):
+                    done = True
+                    break
+                root = inbox_root(upload_id)
+                if root.exists() and any(root.iterdir()):
+                    with _lock:
+                        _upload_waiters.pop(upload_id, None)
+                    return True, None
+            if not done:
+                with _lock:
+                    _upload_waiters.pop(upload_id, None)
+                last_err = f'回传超时（{timeout}s）'
+            elif waiter['ok']:
                 return True, None
-            last_err = waiter['error'] or 'agent 回传失败'
+            else:
+                last_err = waiter['error'] or 'agent 回传失败'
         if attempt < 2:
             time.sleep(5 * (attempt + 1))
     return False, last_err
