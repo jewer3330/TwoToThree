@@ -298,7 +298,12 @@ class Remote:
             local_file.unlink(missing_ok=True)
             raise
     def download_dir(self,remote_dir:str,local_dir:Path,expected_size:int|None=None,expected_sha256:str|None=None):
-        """远端目录压缩后回传并解压；归档取 size+sha256 作为校验基准。"""
+        """远端目录压缩后回传并解压；归档取 size+sha256 作为校验基准。
+
+        幂等：解压后上提目录内容时，若目标已有同名条目（重试/重复调用/残留），
+        先删除再移动，避免 shutil.move 抛 "Destination path ... already exists"
+        使已成功的远端渲染产物无法落库。
+        """
         import tarfile
         from .transfers import TransferError,TRANSFER_FAILED
         remote_dir=self.norm(remote_dir)
@@ -311,7 +316,12 @@ class Remote:
             with tarfile.open(tmp,'r:gz') as t:t.extractall(str(local_dir))
             child=local_dir/name
             if child.is_dir() and child!=local_dir:
-                for item in list(child.iterdir()):shutil.move(str(item),str(local_dir))
+                for item in list(child.iterdir()):
+                    target=local_dir/item.name
+                    if target.exists():
+                        if target.is_dir():shutil.rmtree(target,ignore_errors=True)
+                        else:target.unlink()
+                    shutil.move(str(item),str(target))
                 shutil.rmtree(child,ignore_errors=True)
         finally:
             tmp.unlink(missing_ok=True)

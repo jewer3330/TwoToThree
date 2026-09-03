@@ -127,6 +127,38 @@ def test_selfreg_download_dir(monkeypatch, tmp_path):
     assert not (local_dir / 'renders').exists()   # 目录内容上提，无多余嵌套
 
 
+def test_ssh_download_dir_idempotent(monkeypatch, tmp_path):
+    """远端目录回传解压上提时，本地已有同名条目必须先删再移（幂等），
+    否则 shutil.move 抛 "Destination path already exists"，使已成功渲染的
+    Blender 产物无法落库（Blender 阶段会因此整体 failed）。"""
+    import tarfile
+    import server.backends as b
+    from server import transfers
+    from server.transfers import TransferError, TRANSFER_FAILED
+
+    def _mk_tgz(entries):
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode='w:gz') as t:
+            for name, data in entries:
+                info = tarfile.TarInfo(name)
+                info.size = len(data)
+                t.addfile(info, io.BytesIO(data))
+        return buf.getvalue()
+
+    local_dir = tmp_path / 'out'
+    local_dir.mkdir()
+    (local_dir / 'blender-report.json').write_text('old')   # 模拟残留/重复回传
+
+    r = b.Remote('h', 'root', None, '/r/tt', '/r', '/r/work', os_type='linux')
+    r.remote_archive_metadata = lambda d: ('/r/renders.tgz', 10, '0' * 64)
+    r.download = lambda src, dst, **k: dst.write_bytes(
+        _mk_tgz([('renders/blender-report.json', b'new'), ('renders/front.png', b'PNG')]))
+    r.download_dir('/r/renders', local_dir)
+    assert (local_dir / 'blender-report.json').read_text() == 'new'
+    assert (local_dir / 'front.png').exists()
+    assert not (local_dir / 'renders').exists()
+
+
 def test_selfreg_run_accepts_cwd_remote(monkeypatch):
     """sf3d/triposr 等 remote 分支传 cwd_remote 时不抛 TypeError。"""
     from server.gpu import selfreg as sr
