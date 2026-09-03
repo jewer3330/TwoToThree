@@ -291,51 +291,62 @@ class Agent:
 
     async def _upload_file(self,upload_id:str,path:str,timeout:int):
         """把本地文件 POST 回控制面收件端点。"""
-        try:
-            import httpx
-        except ImportError:
-            await self._send({'type':'upload_done','uploadId':upload_id,'ok':False,
-                              'error':'节点缺少 httpx 依赖，无法回传产物'})
-            return
-        try:
-            url=f'{CONTROL_URL}/api/gpu/selfreg/upload/{upload_id}'
-            headers={'X-Worker-Token':WORKER_TOKEN} if WORKER_TOKEN else {}
-            with open(path,'rb') as fh:
-                name=os.path.basename(path)
-                r=httpx.post(url,files={'file':(name,fh)},headers=headers,timeout=timeout)
-            ok=r.status_code<300
-            await self._send({'type':'upload_done','uploadId':upload_id,'ok':ok,
-                              'error':None if ok else f'HTTP {r.status_code}'})
-        except Exception as exc:
-            print(f'[agent] upload error: {exc}')
-            await self._send({'type':'upload_done','uploadId':upload_id,'ok':False,
-                              'error':str(exc)[:500]})
+        def transfer()->tuple[bool,str|None]:
+            try:
+                import httpx
+            except ImportError:
+                return False,'节点缺少 httpx 依赖，无法回传产物'
+            try:
+                url=f'{CONTROL_URL}/api/gpu/selfreg/upload/{upload_id}'
+                headers={'X-Worker-Token':WORKER_TOKEN} if WORKER_TOKEN else {}
+                with open(path,'rb') as fh:
+                    name=os.path.basename(path)
+                    r=httpx.post(url,files={'file':(name,fh)},headers=headers,timeout=timeout)
+                return r.status_code<300,None if r.status_code<300 else f'HTTP {r.status_code}'
+            except Exception as exc:
+                return False,str(exc)[:500]
+        # httpx 的同步上传可能持续数分钟；必须放在线程里，否则会堵住 WS
+        # 事件循环和 10 秒心跳，控制面会在 45 秒后把仍在传输的节点误判离线。
+        ok,error=await asyncio.to_thread(transfer)
+        if error:print(f'[agent] upload error: {error}')
+        await self._send({'type':'upload_done','uploadId':upload_id,'ok':ok,'error':error})
 
     async def _fetch_files(self,fetch_id:str,marker:str,files:list[str],dest_dir:str):
         """从控制面 pullbox 拉取输入文件到节点本地 dest_dir。"""
-        try:
-            import httpx
-        except ImportError:
-            print('[agent] fetch error: 节点缺少 httpx 依赖')
-            await self._send({'type':'fetch_done','fetchId':fetch_id,'ok':False,
-                              'error':'节点缺少 httpx 依赖，无法拉取输入'})
-            return
-        try:
-            os.makedirs(dest_dir, exist_ok=True)
-            headers={'X-Worker-Token':WORKER_TOKEN} if WORKER_TOKEN else {}
-            for name in files:
-                url=f'{CONTROL_URL}/api/gpu/selfreg/pullbox/{marker}/{name}'
-                resp=httpx.get(url,headers=headers,timeout=300)
-                resp.raise_for_status()
-                target=os.path.join(dest_dir,name)
-                with open(target,'wb') as fh:
-                    fh.write(resp.content)
-                print(f'[agent] fetch {name} ({len(resp.content)} bytes) -> {target}')
-            await self._send({'type':'fetch_done','fetchId':fetch_id,'ok':True})
-        except Exception as exc:
-            print(f'[agent] fetch error: {exc}')
-            await self._send({'type':'fetch_done','fetchId':fetch_id,'ok':False,
-                              'error':str(exc)[:500]})
+        def transfer()->tuple[bool,str|None]:
+            try:
+                import httpx
+            except ImportError:
+                return False,'节点缺少 httpx 依赖，无法拉取输入'
+            try:
+                os.makedirs(dest_dir, exist_ok=True)
+                headers={'X-Worker-Token':WORKER_TOKEN} if WORKER_TOKEN else {}
+                for name in files:
+                    url=f'{CONTROL_URL}/api/gpu/selfreg/pullbox/{marker}/{name}'
+                    target=os.path.join(dest_dir,name)
+                    partial=f'{target}.part-{fetch_id}'
+                    size=0
+                    try:
+                        # 流式落盘，避免大 GLB 整体驻留内存；先写临时文件，成功后
+                        # 原子替换，网络中断也不会留下被后续命令误用的半文件。
+                        with httpx.stream('GET',url,headers=headers,timeout=300) as resp:
+                            resp.raise_for_status()
+                            with open(partial,'wb') as fh:
+                                for chunk in resp.iter_bytes(1024*1024):
+                                    fh.write(chunk)
+                                    size+=len(chunk)
+                        os.replace(partial,target)
+                    finally:
+                        if os.path.exists(partial):
+                            os.unlink(partial)
+                    print(f'[agent] fetch {name} ({size} bytes) -> {target}')
+                return True,None
+            except Exception as exc:
+                return False,str(exc)[:500]
+        # 下载同样不能占住 asyncio 事件循环；大 GLB 跨公网下载超过心跳窗口很常见。
+        ok,error=await asyncio.to_thread(transfer)
+        if error:print(f'[agent] fetch error: {error}')
+        await self._send({'type':'fetch_done','fetchId':fetch_id,'ok':ok,'error':error})
 
     async def _heartbeat_loop(self):
         while True:

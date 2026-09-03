@@ -24,6 +24,19 @@ from . import auth
 from . import autodl
 from . import oss
 
+
+def _execution_mode() -> str:
+    """Return the effective control-plane execution mode for diagnostics.
+
+    The repository supports both the legacy OSS worker split (WORKER_MODE)
+    and the newer SSH/self-registering GPU split (PRINT3D_MODE).  Production
+    installations may set either variable, so health reporting must consider
+    both instead of claiming that a remote control plane has a local worker.
+    """
+    print3d_mode = os.environ.get('PRINT3D_MODE', 'local').strip().lower()
+    worker_mode = os.environ.get('WORKER_MODE', 'local').strip().lower()
+    return 'remote-gpu' if 'remote' in {print3d_mode, worker_mode} else 'local-thread'
+
 @asynccontextmanager
 async def lifespan(_:FastAPI):
     auth.validate_config()
@@ -257,7 +270,8 @@ async def health():
     # decide whether the API itself is alive. Remote capability probing belongs
     # to the dedicated diagnostics endpoint and may legitimately take seconds.
     disk=psutil.disk_usage(str(ROOT));gpu=None
-    if os.environ.get('PRINT3D_MODE')=='remote':
+    execution_mode=_execution_mode()
+    if execution_mode=='remote-gpu':
         gpu={'status':'unverified','name':None}
         caps={k:False for k in ('hunyuan3d','hunyuan3dMultiview','sf3d','triposr','blender','blenderRefinement','blenderStlExport')}
     else:
@@ -268,7 +282,7 @@ async def health():
             import subprocess
             gpu_name=subprocess.check_output(['nvidia-smi','--query-gpu=name','--format=csv,noheader'],text=True,timeout=4,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0)).strip();gpu={'status':'ready' if gpu_name else 'unavailable','name':gpu_name}
         except Exception:pass
-    return {'status':'healthy','cpu':psutil.cpu_percent(),'memory':psutil.virtual_memory().percent,'storage':disk.percent,'gpu':{'status':gpu['status'],'name':gpu['name'],'queueConcurrency':1},'backends':caps,'services':{'api':'online','database':'online','worker':'local-thread'}}
+    return {'status':'healthy','cpu':psutil.cpu_percent(),'memory':psutil.virtual_memory().percent,'storage':disk.percent,'gpu':{'status':gpu['status'],'name':gpu['name'],'queueConcurrency':1},'backends':caps,'services':{'api':'online','database':'online','worker':execution_mode}}
 
 @app.get('/api/system/health/deep')
 def health_deep():

@@ -15,6 +15,22 @@ _threads:dict[str,threading.Thread]={}
 
 def set_paused(value:bool):global _paused;_paused=value
 
+def recover_orphaned_dispatches()->int:
+    """Requeue claims that cannot have a worker thread after process restart.
+
+    ``dispatched`` only covers the small gap between the scheduler claim and
+    ``worker.run`` changing the job to ``running``.  Threads are process-local,
+    so a row still in this state during startup is necessarily orphaned.
+    """
+    with db() as con:
+        rows=con.execute("SELECT id,project_id FROM jobs WHERE status='dispatched'").fetchall()
+        for row in rows:
+            con.execute("UPDATE jobs SET status='queued',gpu_host_id=NULL WHERE id=?",(row['id'],))
+            con.execute("UPDATE projects SET status='queued',updated_at=? WHERE id=? AND current_job_id=?",(now(),row['project_id'],row['id']))
+            con.execute("INSERT INTO events(job_id,event_type,payload,created_at) VALUES(?,?,?,?)",(row['id'],'job.recovered',dump({'reason':'control-plane-restart'}),now()))
+    if rows:print(f'[gpu-scheduler] 已恢复 {len(rows)} 个中断于 dispatched 的任务')
+    return len(rows)
+
 def any_online_host()->bool:
     return any(h.get('enabled') and h.get('status',{}).get('online') for h in hosts.list_hosts())
 

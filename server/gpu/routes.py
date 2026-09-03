@@ -70,6 +70,7 @@ def start_services():
         hosts.ensure_autodl_registered()
     except Exception as exc:
         print(f"[gpu] AutoDL 节点注册失败：{exc}")
+    scheduler.recover_orphaned_dispatches()
     ProbeThread(interval=30).start()
     scheduler.SchedulerThread().start()
     # 自注册（WebSocket dial-out）节点的心跳超时监控

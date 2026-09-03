@@ -23,6 +23,11 @@ from pathlib import Path
 from ..core import DATA
 
 
+# 模型文件常有几十到几百 MB；公网节点拉取一组输入可能明显超过一分钟。
+# agent 单个 HTTP 请求允许 300 秒，控制面必须覆盖整组文件，不能先判失败并重发。
+INPUT_FETCH_TIMEOUT_SECONDS = 600
+
+
 class SelfregRemote:
     """对齐 backends.Remote 所需接口的最小实现（selfreg 节点）。"""
 
@@ -117,7 +122,10 @@ class SelfregRemote:
         if token:
             # 让 agent 先拉取 pullbox 输入到节点本地 stage；失败必须中止，
             # 绝不能不带输入继续执行（否则 GPU 空转后 FileNotFound 误导排查）。
-            ok, err = selfreg.fetch_files_sync(self.node_id, token, self.stage(token), timeout=60)
+            ok, err = selfreg.fetch_files_sync(
+                self.node_id, token, self.stage(token),
+                timeout=INPUT_FETCH_TIMEOUT_SECONDS,
+            )
             if not ok:
                 raise RuntimeError(f'selfreg 输入下发失败（{token}）：{err}')
         exit_code, error = selfreg.run_command_sync(

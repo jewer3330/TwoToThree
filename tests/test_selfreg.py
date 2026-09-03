@@ -12,8 +12,10 @@
   拦截，端点内校验 X-Worker-Token。
 """
 import io
+import sqlite3
 import tarfile
 import threading
+from contextlib import contextmanager
 from pathlib import Path
 
 CAP_KEYS = ('hunyuan3d', 'hunyuan3dMultiview', 'sf3d', 'triposr', 'blender',
@@ -187,7 +189,7 @@ def test_selfreg_run_fetches_by_stage_token(monkeypatch):
     calls = {}
 
     def fake_fetch(node_id, marker, dest_dir, timeout=120):
-        calls['fetch'] = (marker, dest_dir)
+        calls['fetch'] = (marker, dest_dir, timeout)
         return False, 'boom'
 
     monkeypatch.setattr(sr, 'fetch_files_sync', fake_fetch)
@@ -197,7 +199,7 @@ def test_selfreg_run_fetches_by_stage_token(monkeypatch):
         raise AssertionError('fetch 失败应中止执行')
     except RuntimeError as exc:
         assert '输入下发失败' in str(exc)
-    assert calls['fetch'] == ('p3d-abc123', '/w/selfreg-stage/p3d-abc123')
+    assert calls['fetch'] == ('p3d-abc123', '/w/selfreg-stage/p3d-abc123', 600)
     assert remote._marker_token('/w/selfreg-stage/p3d-abc123') == 'p3d-abc123'
     assert remote._marker_token('p3d-xyz') == 'p3d-xyz'
 
@@ -224,6 +226,39 @@ def test_scheduler_selfreg_runs_control_plane_worker(monkeypatch):
     assert done.wait(3), 'selfreg 任务应在本进程（控制面）线程中执行'
     assert ran.get('job') == 'job_x'
     assert ran.get('bound_node') == 'n1'   # 线程已绑定 selfreg 主机 → backends 走 WS 通道
+
+
+def test_scheduler_recovers_orphaned_dispatch_after_restart(monkeypatch):
+    from server.gpu import scheduler
+
+    con = sqlite3.connect(':memory:')
+    con.row_factory = sqlite3.Row
+    con.executescript('''
+        CREATE TABLE jobs (id TEXT, project_id TEXT, status TEXT, gpu_host_id TEXT);
+        CREATE TABLE projects (id TEXT, current_job_id TEXT, status TEXT, updated_at TEXT);
+        CREATE TABLE events (job_id TEXT, event_type TEXT, payload TEXT, created_at TEXT);
+        INSERT INTO jobs VALUES ('job_orphan', 'project_1', 'dispatched', 'gpu_1');
+        INSERT INTO jobs VALUES ('job_active', 'project_1', 'running', 'gpu_1');
+        INSERT INTO projects VALUES ('project_1', 'job_orphan', 'queued', 'old');
+    ''')
+
+    @contextmanager
+    def fake_db():
+        try:
+            yield con
+            con.commit()
+        except Exception:
+            con.rollback()
+            raise
+
+    monkeypatch.setattr(scheduler, 'db', fake_db)
+    assert scheduler.recover_orphaned_dispatches() == 1
+    orphan = con.execute("SELECT status,gpu_host_id FROM jobs WHERE id='job_orphan'").fetchone()
+    active = con.execute("SELECT status FROM jobs WHERE id='job_active'").fetchone()
+    event = con.execute("SELECT event_type FROM events WHERE job_id='job_orphan'").fetchone()
+    assert dict(orphan) == {'status': 'queued', 'gpu_host_id': None}
+    assert active['status'] == 'running'
+    assert event['event_type'] == 'job.recovered'
 
 
 # ---------- 数据面鉴权：机器通道 + token ----------
