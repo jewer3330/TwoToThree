@@ -194,8 +194,28 @@ def _run_command(argv:list[str], cwd:str|None, log_line, timeout:int):
         line=line.rstrip('\n')
         if line and ('%|' not in line or '100%' in line):
             log_line(line)
-    proc.wait(timeout=timeout)
-    return proc.returncode, None
+    try:
+        proc.wait(timeout=timeout)
+        return proc.returncode, None
+    except subprocess.TimeoutExpired:
+        # 超时必须终止子进程，避免孤儿进程继续占用 GPU/写产物
+        # （控制面已判失败，遗留产物会造成下一次同路径脏数据）。
+        try:
+            if os.name == 'nt':
+                subprocess.run(['taskkill', '/PID', str(proc.pid), '/T', '/F'],
+                               capture_output=True, timeout=20)
+            else:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+        return -1, f'命令执行超时（{timeout}s）'
 
 
 class Agent:

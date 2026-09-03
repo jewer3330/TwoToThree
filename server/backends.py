@@ -618,7 +618,9 @@ def generate_hunyuan(image:Path,output:Path,seed:int,quality:str,log,cancelled):
     rimg=r.join(stag,image.name);rout=r.join(stag,output.name);rproc=r.join(stag,'condition-front.png')
     command=[rc['python'],rc['runner'],'--image',rimg,'--model',rc['model'],'--output',rout,'--processed-image-output',rproc,'--steps',str(steps),'--resolution',str(resolution),'--seed',str(seed)]
     log(f'Hunyuan3D 2.1 远程启动（{r.host}）：steps={steps}, octree={resolution}, seed={seed}')
-    r.run(command,log,cancelled,timeout=3000,marker=stag)
+    # 4060 类节点 CPU-offload：加载+20步采样+网格导出实测可达 55 分钟，
+    # 3000s 上限会误杀正常任务 → 放宽到 4500s（75 分钟）。
+    r.run(command,log,cancelled,timeout=4500,marker=stag)
     from .transfers import record_pending,mark_downloaded,mark_verified
     cfg=_host_cfg_snapshot(r)
     # P0：传输前一次远端调用取得 size+SHA-256，持久化 expected 并在下载后校验
@@ -659,7 +661,8 @@ def generate_hunyuan_multiview(images:dict[str,Path],output:Path,seed:int,qualit
         for role in ('front','side','back'):command.extend([f'--{role}-weight',str(weights[role])])
         visual=visual_conditioning or {};mode=str(visual.get('mode','auto')) if visual.get('enabled',True) else 'original';depth_blend=max(0,min(.25,float(visual.get('depthBlend',.15))));command.extend(['--visual-conditioning',mode,'--style',style,'--depth-blend',str(depth_blend)])
         log(f'Hunyuan3D-2mv 远程启动（{r.host}）：views=front,side,back, weights={weights}, steps={steps}, octree={resolution}, seed={seed}')
-        r.run(command,log,cancelled,timeout=3000,marker=stag)
+        # 与单图一致：CPU-offload 节点全流程可能 >50 分钟，放宽上限避免误杀
+        r.run(command,log,cancelled,timeout=4500,marker=stag)
         from .transfers import record_pending,mark_downloaded,mark_verified
         cfg=_host_cfg_snapshot(r)
         size,sha=r.remote_metadata(rout)
