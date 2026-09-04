@@ -1,6 +1,6 @@
 import {Save} from 'lucide-react';
 import {useEffect,useMemo,useState} from 'react';
-import {api,type SiteSettings} from '../api';
+import {api,type SiteSettingEntry,type SiteSettings} from '../api';
 import {PageHeader} from '../App';
 
 /** 系统设置：站点级可配置项（域名/接入/存储/安全）统一在此查看与修改。 */
@@ -15,7 +15,7 @@ export default function SettingsPage() {
 
   const groups=useMemo(()=>{
     if(!settings)return [];
-    const map=new Map<string,{key:string;label:string;hint:string}[]>();
+    const map=new Map<string,SiteSettingEntry[]>();
     for(const e of settings.entries){const list=map.get(e.group)||[];list.push(e);map.set(e.group,list);}
     return [...map.entries()];
   },[settings]);
@@ -24,7 +24,7 @@ export default function SettingsPage() {
     setSaving(true);setMsg('');setErr('');
     try{
       const s=await api.saveSettings(values);
-      setSettings(s);setValues(s.values);setMsg('已保存。域名/CORS 类配置重启服务后生效（部分立即生效）。');
+      setSettings(s);setValues(s.values);      setMsg('已保存。传输/存储后端、CORS 等立即生效；站点展示类配置下次加载生效。');
     }catch(e){setErr(String((e as Error).message||e));}
     setSaving(false);
   };
@@ -46,9 +46,15 @@ export default function SettingsPage() {
             <label htmlFor={`set-${e.key}`} style={{display:'flex',justifyContent:'space-between',fontSize:13,fontWeight:600,marginBottom:4}}>
               <span>{e.label}</span><code style={{color:'#999',fontSize:11}}>{e.key}</code>
             </label>
-            <input id={`set-${e.key}`} type="text" value={values[e.key]??''}
-              onChange={ev=>setValues(v=>({...v,[e.key]:ev.target.value}))}
-              style={{width:'100%',padding:'8px 10px',borderRadius:6,border:'1px solid var(--border,#ddd)',fontSize:13,fontFamily:'monospace'}}/>
+            {e.options
+              ? <select id={`set-${e.key}`} value={values[e.key]??''}
+                  onChange={ev=>setValues(v=>({...v,[e.key]:ev.target.value}))}
+                  style={{width:'100%',padding:'8px 10px',borderRadius:6,border:'1px solid var(--border,#ddd)',fontSize:13}}>
+                  {e.options.map(o=><option key={o.value} value={o.value}>{o.label}</option>)}
+                </select>
+              : <input id={`set-${e.key}`} type="text" value={values[e.key]??''}
+                  onChange={ev=>setValues(v=>({...v,[e.key]:ev.target.value}))}
+                  style={{width:'100%',padding:'8px 10px',borderRadius:6,border:'1px solid var(--border,#ddd)',fontSize:13,fontFamily:'monospace'}}/>}
             {e.hint&&<p style={{margin:'3px 0 0',fontSize:12,color:'#888'}}>{e.hint}</p>}
           </div>
         ))}

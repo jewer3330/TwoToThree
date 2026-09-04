@@ -84,14 +84,18 @@ class OssStorage:
 
 
 def resolve_transfer_backend(node_cfg: dict | None = None) -> str:
-    """决定文件传输后端：节点级 transfer 优先，其次全局 STORAGE_BACKEND。
+    """决定文件传输后端：节点级 transfer 优先，其次全局配置。
+
+    全局后端优先读取系统设置覆盖（管理后台「对象存储 → 传输/存储后端」，
+    持久化到 site_settings.json）；未覆盖时退回 STORAGE_BACKEND 环境变量。
 
     返回值：'oss'（对象存储，公网可达）或 'cdn'（CDN+scp，SSH 节点直传）。
     """
     node = ((node_cfg or {}).get("transfer") or "").strip().lower()
     if node in ("oss", "cdn"):
         return node
-    backend = (config.STORAGE_BACKEND or "auto").strip().lower()
+    from . import settings
+    backend = (settings.current("storage.backend") or config.STORAGE_BACKEND or "auto").strip().lower()
     if backend in ("oss", "cdn"):
         return backend
     # auto：有完整 OSS 凭据则用 OSS，否则 CDN+scp

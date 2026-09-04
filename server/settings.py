@@ -65,17 +65,27 @@ CATALOG: dict[str, dict[str, Any]] = {
         "hint": "GPU 节点 agent 需要连入的控制面地址（部署用提示）",
     },
     # -- 对象存储 --
+    "storage.backend": {
+        "env": "STORAGE_BACKEND", "default": "auto", "group": "对象存储",
+        "label": "传输 / 存储后端",
+        "hint": "auto=有 OSS 凭据用 OSS 否则走 CDN/节点直传；oss=强制阿里 OSS；cdn=强制 CDN/节点直传。保存后立即生效，不再需要改环境变量。",
+        "options": [
+            {"value": "auto", "label": "自动（auto）"},
+            {"value": "oss", "label": "阿里云 OSS（oss）"},
+            {"value": "cdn", "label": "CDN / 节点直传（cdn）"},
+        ],
+    },
     "site.ossBucket": {
         "env": "OSS_BUCKET", "default": "", "group": "对象存储",
-        "label": "OSS Bucket", "hint": "阿里云 OSS 桶名（展示）",
+        "label": "OSS Bucket", "hint": "阿里云 OSS 桶名（凭据仍从环境变量读取）",
     },
     "site.ossEndpoint": {
         "env": "OSS_ENDPOINT", "default": "", "group": "对象存储",
-        "label": "OSS Endpoint", "hint": "地域节点（展示）",
+        "label": "OSS Endpoint", "hint": "地域节点（凭据仍从环境变量读取）",
     },
     "site.ossPublicEndpoint": {
         "env": "OSS_PUBLIC_ENDPOINT", "default": "", "group": "对象存储",
-        "label": "OSS 公网域名", "hint": "CNAME/自定义域名（展示）",
+        "label": "OSS 公网域名", "hint": "CNAME/自定义域名，浏览器下载签名使用（凭据仍从环境变量读取）",
     },
     # -- 安全 --
     "auth.disabled": {
@@ -145,6 +155,7 @@ def catalog_entries(admin: bool = False) -> list[dict]:
             "hint": definition.get("hint", ""),
             "sensitive": bool(definition.get("sensitive")),
             "secret": bool(definition.get("secret")),
+            "options": definition.get("options"),
             "value": value,
         })
     out.sort(key=lambda e: e["key"])

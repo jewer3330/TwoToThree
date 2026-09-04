@@ -334,6 +334,6 @@ export const api = {
 };
 
 export type AuthUser={authenticated:true;sub:string;name:string;email:string;role:'admin'|'user';groups:string[];adminGroup?:string;userGroup?:string};
-export interface SiteSettingEntry { key:string; group:string; label:string; hint:string; sensitive:boolean; secret:boolean; value:string; }
+export interface SiteSettingEntry { key:string; group:string; label:string; hint:string; sensitive:boolean; secret:boolean; options?:{value:string;label:string}[]; value:string; }
 export interface SiteSettings { entries: SiteSettingEntry[]; values: Record<string,string>; }
 export interface SiteInfo { name:string; publicBaseUrl:string; authDisabled:boolean; }

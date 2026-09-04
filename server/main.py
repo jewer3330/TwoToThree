@@ -252,7 +252,9 @@ def get_project(pid):
 @app.get('/api/system/storage')
 def storage_status():
     """存储与算力配置状态（仅管理员；不返回任何凭据）。"""
+    from .storage import resolve_transfer_backend
     return {
+        'backend': resolve_transfer_backend(),
         'oss': {
             'configured': oss.configured(),
             'bucket': oss.OSS_BUCKET,
