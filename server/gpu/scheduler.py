@@ -49,9 +49,10 @@ def _pick_host(job:dict):
     requested=[config.get('primaryBackend','hunyuan3d'),*config.get('fallbackBackends',['sf3d','triposr'])]
     with db() as con:
         multi=con.execute('SELECT COUNT(*) c FROM assets WHERE project_id=? AND role IN (\'side\',\'back\') AND active=1',(job['project_id'],)).fetchone()['c']
-    # 按延迟升序排序（低延迟优先，直连优于 relay）
+    # 排序：延迟优先，其次失败惩罚连击（连续网络失败的主机降权），再按名。
     candidates=sorted(hosts.list_hosts(),key=lambda h:(
         h.get('status',{}).get('latencyMs') if h.get('status',{}).get('latencyMs') is not None else 10**6,
+        hosts.host_failure_streak(h['id']),
         h.get('name','')))
     for backend in dict.fromkeys(requested):
         for h in candidates:
@@ -62,6 +63,9 @@ def _pick_host(job:dict):
             if not caps.get(backend):continue
             if backend=='hunyuan3d' and multi and not caps.get('hunyuan3dMultiview'):continue
             if s.get('runningJobs',0)>=int(h.get('maxConcurrentJobs',1)):continue
+            # 网络失败惩罚：惩罚窗口内连击达到上限的主机本轮不再派发
+            if hosts.host_failure_streak(h['id'])>=hosts._FAIL_MAX_STREAK:
+                continue
             return h,backend
     return None,None
 
@@ -71,6 +75,9 @@ def _dispatcher():
             if not _paused:
                 _autodl_lifecycle()
                 for job in _queued_jobs():
+                    # 网络类失败自动重试：退避未到期不重复派发（保持 queued）
+                    if not hosts.network_retry_ready(job['id']):
+                        continue
                     host,backend=_pick_host(job)
                     if not host:break
                     if _claim(job,host):_spawn(job,host)
@@ -159,6 +166,14 @@ def _spawn(job:dict,host:dict):
         try:
             bind_host(host)
             worker_run(job['id'])
+            # 回写失败惩罚：completed 清零；其余失败计连击（网络类已在 worker 记录）
+            with db() as con:
+                r=con.execute('SELECT status FROM jobs WHERE id=?',(job['id'],)).fetchone()
+            final=r['status'] if r else None
+            if final=='completed':
+                hosts.record_host_success(host['id'])
+            elif final=='failed':
+                hosts.record_host_failure(host['id'])
         except Exception as exc:
             print(f'[gpu-scheduler] 任务 {job["id"]} 在主机 {host.get("name")} 执行异常：{exc}')
         finally:

@@ -22,10 +22,23 @@ from pathlib import Path
 
 from ..core import DATA
 
-
 # 模型文件常有几十到几百 MB；公网节点拉取一组输入可能明显超过一分钟。
 # agent 单个 HTTP 请求允许 300 秒，控制面必须覆盖整组文件，不能先判失败并重发。
 INPUT_FETCH_TIMEOUT_SECONDS = 600
+
+# 网络可恢复类错误关键词：节点离线/断线/投递失败/通道超时。命中这些的任务失败
+# 会转 NETWORK_RETRY 由调度器退避后自动重派，而不是整单 failed。
+_NETWORK_HINTS = (
+    '节点离线', '消息投递失败', '连接', '断线', '超时', 'timed out',
+    'connection', 'disconnect', 'offline', 'timeout',
+)
+
+def is_network_error(error: str | None) -> bool:
+    """判断 selfreg 通道错误是否属于「网络可恢复」类（供自动重试归类）。"""
+    if not error:
+        return False
+    lowered = error.lower()
+    return any(hint in lowered for hint in _NETWORK_HINTS)
 
 
 class SelfregRemote:
@@ -118,6 +131,7 @@ class SelfregRemote:
     def run(self, command: list[str], log, cancelled, timeout: int = 3600,
             marker: str = '', cwd_remote: str | None = None):
         from . import selfreg
+        from ..transfers import NETWORK_RETRY, TransferError
         token = self._marker_token(marker)
         if token:
             # 让 agent 先拉取 pullbox 输入到节点本地 stage；失败必须中止，
@@ -127,10 +141,15 @@ class SelfregRemote:
                 timeout=INPUT_FETCH_TIMEOUT_SECONDS,
             )
             if not ok:
-                raise RuntimeError(f'selfreg 输入下发失败（{token}）：{err}')
+                # 输入未下发=节点不可用/通道抖动 → 网络可恢复，调度自动重派
+                raise TransferError(NETWORK_RETRY, f'selfreg 输入下发失败（{token}）：{err}')
         exit_code, error = selfreg.run_command_sync(
             self.node_id, command, cwd=cwd_remote, timeout=timeout, log=log)
         if error:
+            # 离线/投递失败/通道超时（可能卡死但无退出码）→ 网络可恢复；
+            # 真实执行错误会以 exit_code 返回，不在此处判网络。
+            if is_network_error(error):
+                raise TransferError(NETWORK_RETRY, f'selfreg 节点执行失败：{error}')
             raise RuntimeError(f'selfreg 节点执行失败：{error}')
         if exit_code:
             raise RuntimeError(f'selfreg 节点命令退出码 {exit_code}')
@@ -143,9 +162,10 @@ class SelfregRemote:
                       timeout: int = 600) -> Path:
         """请求 agent 上传 remote_path 到 inbox，然后本地取走。"""
         from . import selfreg
+        from ..transfers import NETWORK_RETRY, TransferError
         ok, err = selfreg.upload_file_sync(self.node_id, remote_path, timeout=timeout)
         if not ok:
-            raise RuntimeError(f'selfreg 产物回传失败：{err}')
+            raise TransferError(NETWORK_RETRY, f'selfreg 产物回传失败：{err}')
         return local_path
 
     def download_file(self, remote_file: str, local_file: Path, expected_size=None,
@@ -170,19 +190,22 @@ class SelfregRemote:
         """
         import tarfile
         from . import selfreg
+        from ..transfers import NETWORK_RETRY, TransferError
         remote_dir = self.norm(remote_dir)
         parent, name = self._split(remote_dir)
         tgz = f'{remote_dir}.tgz'
         exit_code, error = selfreg.run_command_sync(
             self.node_id, ['tar', '-czf', tgz, '-C', parent, name], timeout=300)
         if error:
+            if is_network_error(error):
+                raise TransferError(NETWORK_RETRY, f'selfreg 目录打包失败：{error}')
             raise RuntimeError(f'selfreg 目录打包失败：{error}')
         if exit_code:
             raise RuntimeError(f'selfreg 目录打包退出码 {exit_code}')
         upload_id = f'up-{uuid.uuid4().hex[:12]}'
         ok, err = selfreg.upload_file_sync(self.node_id, tgz, upload_id=upload_id)
         if not ok:
-            raise RuntimeError(f'selfreg 产物回传失败：{err}')
+            raise TransferError(NETWORK_RETRY, f'selfreg 产物回传失败：{err}')
         inbox = self._inbox_root(upload_id)
         files = sorted(inbox.iterdir()) if inbox.exists() else []
         if not files:
@@ -210,12 +233,13 @@ class SelfregRemote:
     def _pull_single(self, remote_file: str, local_file: Path):
         """agent 上传单个文件到 inbox → 控制面拷贝到 local_file。"""
         from . import selfreg
+        from ..transfers import NETWORK_RETRY, TransferError
         local_file.parent.mkdir(parents=True, exist_ok=True)
         upload_id = f'up-{uuid.uuid4().hex[:12]}'
         ok, err = selfreg.upload_file_sync(self.node_id, remote_file,
                                            upload_id=upload_id)
         if not ok:
-            raise RuntimeError(f'selfreg 产物回传失败：{err}')
+            raise TransferError(NETWORK_RETRY, f'selfreg 产物回传失败：{err}')
         inbox = self._inbox_root(upload_id)
         files = sorted(inbox.iterdir()) if inbox.exists() else []
         if not files:

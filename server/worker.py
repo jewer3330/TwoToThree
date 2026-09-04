@@ -184,6 +184,20 @@ def _run_inner(job_id:str):
         # P0：传输失败 → transfer_pending（GPU 产物保留，不重跑推理，可 resume 续传）
         from .transfers import pending_for_job
         code=getattr(exc,'code',None) or 'TRANSFER_FAILED'
+        # selfreg/网络通道类失败（节点离线/抖动/通道超时）：自动退避回队列重派，
+        # 保留 attempt 与版本，节点回线后由调度器重跑未完成阶段，而非整单失败。
+        if code=='NETWORK_RETRY':
+            from .gpu import hosts as gpu_hosts
+            host_id=job.get('gpu_host_id')
+            if host_id:gpu_hosts.record_host_failure(host_id)
+            backoff=min(90*(int(job.get('attempt') or 1)+1),900)
+            gpu_hosts.schedule_network_retry(job_id,backoff)
+            with db() as con:
+                con.execute("UPDATE jobs SET status='queued',gpu_host_id=NULL,error_code=?,error_summary=? WHERE id=?",(code,f'网络通道失败，{backoff:.0f}s 后自动重试：{exc}'))
+                con.execute("UPDATE projects SET status='queued',updated_at=? WHERE current_job_id=?",(now(),job_id))
+            log(job_id,f'网络通道失败（{code}），{backoff:.0f}s 后自动重试：{exc}')
+            emit(job_id,'job.status',{'status':'queued','retryIn':backoff,'errorCode':code})
+            return
         with db() as con:
             con.execute("UPDATE jobs SET status='transfer_pending',error_code=?,error_summary=?,completed_at=? WHERE id=?",(code,str(exc)[:500],now(),job_id))
             con.execute("UPDATE projects SET status='transfer_pending',updated_at=? WHERE current_job_id=?",(now(),job_id))

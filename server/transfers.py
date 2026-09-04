@@ -19,6 +19,10 @@ COMPUTE_FAILED='COMPUTE_FAILED'
 TRANSFER_FAILED='TRANSFER_FAILED'
 CHECKSUM_MISMATCH='CHECKSUM_MISMATCH'
 COMMIT_FAILED='COMMIT_FAILED'
+# selfreg/网络通道专用：节点离线/消息投递失败/通道超时等「网络可恢复」类失败。
+# worker 收到该 code 会把任务放回队列（保留 attempt/version），待节点回线后由
+# 调度器自动重派重跑，而不是整单失败；配合主机失败惩罚避免反复派给坏节点。
+NETWORK_RETRY='NETWORK_RETRY'
 
 _lock=threading.RLock()
 

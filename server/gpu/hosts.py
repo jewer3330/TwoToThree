@@ -13,6 +13,12 @@ _lock=threading.RLock()
 _state:dict[str,dict]={}   # host_id -> {online,gpu,memTotal,memUsed,diskFree,caps,lastProbeAt,lastError,runningJobs,queuedJobs}
 _dynamic:dict[str,dict]={}  # 自注册节点（WebSocket dial-out，仅内存，不持久化到 gpu_hosts.json）
 _probe_pending:set[str]=set()
+# 网络类失败自动重试记簿：job_id -> 允许再次派发的最早时间（unix ts，进程内）
+_net_retry:dict[str,float]={}
+# 网络失败惩罚衰减窗口（秒）：一次失败后该主机在窗口内被调度降权/跳过
+_FAIL_PENALTY_WINDOW=600
+# 失败惩罚达到该值的主机在窗口内不再派发
+_FAIL_MAX_STREAK=3
 
 def _read()->list[dict]:
     if not HOSTS_FILE.exists():return []
@@ -157,6 +163,53 @@ def queue_state()->dict:
 
 def host_state(host_id:str)->dict:
     with _lock:return dict(_state.get(host_id,{}))
+
+# ---- 网络失败惩罚（调度按此降权/跳过不稳定节点）----
+def record_host_failure(host_id:str):
+    with _lock:
+        s=_state.setdefault(host_id,{})
+        s['failStreak']=int(s.get('failStreak',0))+1
+        s['failStreakAt']=time.time()
+
+def record_host_success(host_id:str):
+    with _lock:
+        s=_state.get(host_id)
+        if s and s.get('failStreak'):
+            s['failStreak']=0
+            s.pop('failStreakAt',None)
+
+def host_failure_streak(host_id:str)->int:
+    """当前失败连击数；超过惩罚窗口自动按 0 处理（允许节点恢复后再次尝试）。"""
+    with _lock:
+        s=_state.get(host_id)
+        if not s or not s.get('failStreak'):
+            return 0
+        if time.time()-(s.get('failStreakAt') or 0)>_FAIL_PENALTY_WINDOW:
+            return 0
+        return int(s['failStreak'])
+
+# ---- 网络类任务自动重试记簿（job 级退避）----
+def schedule_network_retry(job_id:str, delay_seconds:float=120.0):
+    with _lock:
+        _net_retry[job_id]=time.time()+max(10.0,float(delay_seconds))
+
+def network_retry_ready(job_id:str)->bool:
+    with _lock:
+        due=_net_retry.get(job_id)
+        if due is None:
+            return True
+        if time.time()>=due:
+            _net_retry.pop(job_id,None)
+            return True
+        return False
+
+def network_retry_delay(job_id:str)->float:
+    """下次可派发还需等待的秒数（0=已就绪）。"""
+    with _lock:
+        due=_net_retry.get(job_id)
+        if due is None:
+            return 0.0
+        return max(0.0,due-time.time())
 
 def request_probe(host_id:str):
     _probe_pending.add(host_id)
