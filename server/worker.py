@@ -4,6 +4,7 @@ from pathlib import Path
 from .core import ROOT,db,dump,now,project_dir,resolve_storage,sha256,storage_path,uid
 from .backends import BackendError,CancelledError,capabilities,generate_hunyuan,generate_hunyuan_multiview,generate_sf3d,generate_triposr,render_blender
 from .transfers import TransferError
+from .artifacts import prepare_artifact
 
 STAGES=[('intake','素材接收'),('analysis','主体分析'),('geometry','几何生成'),('glb_validation','GLB 检查'),('multi_view_render','Blender 标准化与四视图'),('web_optimization','Web GLB 输出')]
 _threads:dict[str,threading.Thread]={}
@@ -43,8 +44,8 @@ def glb_geometry_metrics(path:Path)->dict:
     robust=[q(v,.95)-q(v,.05) for v in axes];ordered=sorted(robust);ratio=ordered[0]/max(ordered[-1],1e-9)
     return {'vertexCount':len(axes[0]),'robustDimensions':{'x':robust[0],'y':robust[1],'z':robust[2]},'thinAxisRatio':ratio,'flat':ratio<.08}
 def add_artifact(job,kind,label,path:Path,mime,metadata=None):
-    aid=uid('art');rel=storage_path(path)
-    with db() as con:con.execute('INSERT INTO artifacts VALUES(?,?,?,?,?,?,?,?,?,?,?)',(aid,job['id'],job['version_id'],kind,label,rel,mime,path.stat().st_size,sha256(path),dump(metadata or {}),now()))
+    aid=uid('art');rel,size,digest,meta=prepare_artifact(path,mime,metadata)
+    with db() as con:con.execute('INSERT INTO artifacts VALUES(?,?,?,?,?,?,?,?,?,?,?)',(aid,job['id'],job['version_id'],kind,label,rel,mime,size,digest,meta,now()))
     emit(job['id'],'stage.output',{'artifactId':aid,'type':kind,'label':label})
 def report(job,stage,status,started,warnings=None,error=None,next_action=None):
     folder=project_dir(job['project_id'])/'versions'/job['version_id']/'reports';folder.mkdir(parents=True,exist_ok=True)

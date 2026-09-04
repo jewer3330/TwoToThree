@@ -628,10 +628,10 @@ def generate_hunyuan(image:Path,output:Path,seed:int,quality:str,log,cancelled):
     rimg=r.join(stag,image.name);rout=r.join(stag,output.name);rproc=r.join(stag,'condition-front.png')
     command=[rc['python'],rc['runner'],'--image',rimg,'--model',rc['model'],'--output',rout,'--processed-image-output',rproc,'--steps',str(steps),'--resolution',str(resolution),'--seed',str(seed)]
     log(f'Hunyuan3D 2.1 远程启动（{r.host}）：steps={steps}, octree={resolution}, seed={seed}')
-    # 4060 类节点 CPU-offload：加载+20步采样+网格导出实测可达 55 分钟；
-    # 同机多 agent 抢卡（dev/prod 各自调度到同一节点）时可能拖到 2 小时，
-    # 4500s 仍会误杀 → 放宽到 7200s（120 分钟）。
-    r.run(command,log,cancelled,timeout=7200,marker=stag)
+    # 4060 类节点 CPU-offload：加载+20步采样+网格导出实测 55 分钟（4090）；
+    # 8GB 显存节点实测单 Diffusion 采样 1h47m、含后处理全流程 >2h20m（2026-09-03
+    # 复测：采样 100% 后仍在导出，7200s 误杀）→ 放宽到 10800s（180 分钟）。
+    r.run(command,log,cancelled,timeout=10800,marker=stag)
     from .transfers import record_pending,mark_downloaded,mark_verified
     cfg=_host_cfg_snapshot(r)
     # P0：传输前一次远端调用取得 size+SHA-256，持久化 expected 并在下载后校验
@@ -672,8 +672,8 @@ def generate_hunyuan_multiview(images:dict[str,Path],output:Path,seed:int,qualit
         for role in ('front','side','back'):command.extend([f'--{role}-weight',str(weights[role])])
         visual=visual_conditioning or {};mode=str(visual.get('mode','auto')) if visual.get('enabled',True) else 'original';depth_blend=max(0,min(.25,float(visual.get('depthBlend',.15))));command.extend(['--visual-conditioning',mode,'--style',style,'--depth-blend',str(depth_blend)])
         log(f'Hunyuan3D-2mv 远程启动（{r.host}）：views=front,side,back, weights={weights}, steps={steps}, octree={resolution}, seed={seed}')
-        # 与单图一致：CPU-offload 节点全流程可能 >50 分钟，同机抢卡时更久，放宽到 7200s
-        r.run(command,log,cancelled,timeout=7200,marker=stag)
+        # 与单图一致：CPU-offload 8GB 节点全流程实测 >2h20m，放宽到 10800s（180 分钟）
+        r.run(command,log,cancelled,timeout=10800,marker=stag)
         from .transfers import record_pending,mark_downloaded,mark_verified
         cfg=_host_cfg_snapshot(r)
         size,sha=r.remote_metadata(rout)

@@ -19,6 +19,7 @@ COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 COPY server ./server
 COPY pipeline ./pipeline
+COPY scripts ./scripts
 COPY public ./public
 COPY studio_paths.py ./
 COPY --from=web /build/dist ./dist

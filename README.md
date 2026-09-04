@@ -27,7 +27,7 @@ npm run dev
 默认仍是单机模式（`WORKER_MODE=local`，进程内线程跑流水线）。设置 `WORKER_MODE=remote` 后拆为三节点：
 
 - **总控**（ECS）：FastAPI + SQLite + 前端，任务停在 `queued`，通过 `/api/worker/*` 接口供远端认领。
-- **OSS**：输入素材与产物的共享交换层。
+- **OSS**：输入素材与产物的共享交换层，同时通过鉴权后的短时签名 URL 直接服务模型文件；ECS 只保留本地缓存。
 - **显卡机**：`server.remote_worker` 拉取任务、跑 Hunyuan3D/Blender、产物回传 OSS 并上报。
 
 部署步骤与环境变量见 [`deploy/README.md`](deploy/README.md)，架构与数据流见 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)。

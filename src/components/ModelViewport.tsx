@@ -75,14 +75,47 @@ export default function ModelViewport({
       gray = false,
       wire = false,
       disposed = false;
+    const download = new AbortController();
     const originals = new Map<THREE.Mesh, THREE.Material | THREE.Material[]>(),
       grayMat = new THREE.MeshStandardMaterial({
         color: 0xaab2bd,
         roughness: 0.72,
       });
-    new GLTFLoader().load(
-      url,
-      (g) => {
+    setError("");
+    setLoading(0);
+    const loadModel = async () => {
+      try {
+        const response = await fetch(url, {
+          signal: download.signal,
+          credentials: "same-origin",
+        });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const total = Number(response.headers.get("content-length")) || 0;
+        const reader = response.body?.getReader();
+        let buffer: ArrayBuffer;
+        if (reader) {
+          const chunks: Uint8Array[] = [];
+          let loaded = 0;
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            chunks.push(value);
+            loaded += value.byteLength;
+            if (total) setLoading(Math.min(99, Math.round((loaded / total) * 100)));
+          }
+          const bytes = new Uint8Array(loaded);
+          let offset = 0;
+          for (const chunk of chunks) {
+            bytes.set(chunk, offset);
+            offset += chunk.byteLength;
+          }
+          buffer = bytes.buffer;
+        } else {
+          buffer = await response.arrayBuffer();
+        }
+        if (disposed) return;
+        const resourceBase = new URL(".", response.url).href;
+        new GLTFLoader().parse(buffer, resourceBase, (g) => {
         if (disposed) return;
         model = g.scene;
         let vertices = 0,
@@ -128,13 +161,16 @@ export default function ModelViewport({
           textures: textures.size,
         });
         setLoading(100);
-      },
-      (e) => e.total && setLoading(Math.round((e.loaded / e.total) * 100)),
-      (e) =>
-        setError(
-          `GLB 加载失败：${e instanceof Error ? e.message : "文件不可解析"}`,
-        ),
-    );
+        }, (e) => {
+          if (!disposed) setError(`GLB 加载失败：${e instanceof Error ? e.message : "文件不可解析"}`);
+        });
+      } catch (e) {
+        if (!disposed && !(e instanceof DOMException && e.name === "AbortError")) {
+          setError(`GLB 加载失败：${e instanceof Error ? e.message : "文件不可解析"}`);
+        }
+      }
+    };
+    void loadModel();
     const applyCamera = (state: ViewportCameraState) => {
       auto = false;
       camera.position.fromArray(state.position);
@@ -225,10 +261,20 @@ export default function ModelViewport({
     });
     return () => {
       disposed = true;
+      download.abort();
       ro.disconnect();
       controls.removeEventListener("end", controlsEnd);
       renderer.setAnimationLoop(null);
       renderer.domElement.removeEventListener("dblclick", click);
+      model?.traverse((object) => {
+        const mesh = object as THREE.Mesh;
+        if (!mesh.isMesh) return;
+        mesh.geometry.dispose();
+        (Array.isArray(mesh.material) ? mesh.material : [mesh.material]).forEach((material) => {
+          Object.values(material).forEach((value) => (value as THREE.Texture)?.isTexture && (value as THREE.Texture).dispose());
+          material.dispose();
+        });
+      });
       renderer.dispose();
       grayMat.dispose();
       el.replaceChildren();

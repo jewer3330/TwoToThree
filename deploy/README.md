@@ -18,8 +18,8 @@
 显卡机（remote_worker：Hunyuan3D + Blender）──────────▶ 下载输入 / 上传产物
 ```
 
-- **总控**：跑 `server.main:app`，`WORKER_MODE=remote`，任务停留在 `queued`，由显卡机认领；产物经 OSS 回传后落回本地缓存并入库。
-- **OSS**：输入素材与产物的共享交换层（bucket `print-3d`），总控与显卡机共用同一份 AccessKey。
+- **总控**：跑 `server.main:app`，`WORKER_MODE=remote`，任务停留在 `queued`，由显卡机认领；最终制品上传并校验 OSS 后才入库完成。
+- **OSS**：输入/产物交换层，也是浏览器大文件的服务源；私有 Bucket 通过鉴权后的短时签名 URL 下载。
 - **显卡机**：跑 `server.remote_worker`，轮询认领生成/精修任务，本地 Hunyuan3D/Blender 推理，产物回传 OSS 并上报总控。
 
 ## 一、总控（ECS）
@@ -43,7 +43,7 @@ sudo systemctl daemon-reload && sudo systemctl enable --now two-to-three-control
 .venv/bin/python -m uvicorn server.main:app --host 0.0.0.0 --port 8000
 ```
 
-前端静态页：`npm run build` 生成 `dist/`，由 nginx 托管并反代 `/api`、`/data`、`/public` 到 `127.0.0.1:8000`：
+前端静态页：`npm run build` 生成 `dist/`，由 nginx 托管；哈希资源设置长期缓存并开启 gzip，`/api`、兼容用的 `/data`、`/public` 反代到 FastAPI：
 
 ```nginx
 server {
@@ -85,9 +85,23 @@ sudo systemctl daemon-reload && sudo systemctl enable --now two-to-three-worker
 | `WORKER_TOKEN` | 总控↔显卡机鉴权令牌 | 两者 |
 | `CONTROL_URL` | 总控 API 根地址 | 显卡机 |
 | `OSS_ENDPOINT` | OSS 地域节点 | 两者 |
+| `OSS_INTERNAL_ENDPOINT` | ECS 同地域上传/校验的内网端点；浏览器签名仍用公网端点 | 总控 |
 | `OSS_BUCKET` | 桶名 | 两者 |
 | `OSS_ACCESS_KEY_ID` / `OSS_ACCESS_KEY_SECRET` | OSS 凭据 | 两者 |
 | `OSS_PREFIX` | 对象键前缀（默认 `two-to-three`） | 两者 |
+| `OSS_DOWNLOAD_EXPIRES` | 浏览器私有下载签名有效期（默认 600 秒） | 总控 |
+| `OSS_ARTIFACT_PREFIX` | 内容寻址最终制品子目录（默认 `artifacts`） | 总控 |
+
+已有本地制品上线 OSS 前执行：
+
+```bash
+python scripts/configure_oss_cors.py --origin https://你的站点域名
+python scripts/backfill_artifacts_to_oss.py --dry-run
+python scripts/backfill_artifacts_to_oss.py
+```
+
+dev 与 prod 共用 Bucket 时必须使用不同 `OSS_PREFIX`，例如
+`two-to-three/dev` 与 `two-to-three`。
 | `HUNYUAN_PY` / `HUNYUAN_MODEL` / `HUNYUAN_RUNNER` | Hunyuan 环境/权重/脚本 | 显卡机 |
 | `BLENDER` / `BLENDER_RENDERER` / `BLENDER_REFINER` | Blender 及脚本 | 显卡机 |
 | `POLL_INTERVAL` | 认领轮询间隔（秒，默认 5） | 显卡机 |

@@ -14,10 +14,11 @@
                         │  ├─ SQLite（data/studio.db）                   │
                         │  └─ 本地磁盘缓存（data/projects/...）           │
                         └───────────────┬──────────────────────────────┘
-                                        │ oss2（上传输入 / 下载产物）
+                                        │ oss2（ECS 同地域时走内网端点）
                         ┌───────────────▼──────────────────────────────┐
                         │  阿里云 OSS（bucket: print-3d）                │
-                        │  前缀：two-to-three/projects/<pid>/...        │
+                        │  交换对象：two-to-three/projects/<pid>/...    │
+                        │  最终制品：two-to-three/artifacts/<sha256>    │
                         └───────────────▲──────────────────────────────┘
                                         │ oss2（下载输入 / 上传产物）
                         ┌───────────────┴──────────────────────────────┐
@@ -38,6 +39,9 @@
 3. 显卡机从 OSS 下载正面图，调用 `server.pipeline.run_pipeline` 跑 Hunyuan3D → Blender 四视图。
 4. 运行中 `POST /api/worker/generate/{jid}/stage` / `.../log` 上报进度，总控写 `stages` / `events`，前端经 SSE 实时可见。
 5. 完成后显卡机把 GLB/四视图上传 OSS，`POST .../complete`；总控从 OSS 下载产物到本地缓存并入库，任务 `completed`，项目 `ready_for_review`。
+6. 最终制品入库前按 SHA-256 内容寻址上传 OSS 并校验大小。浏览器请求同源
+   `/api/artifacts/{id}/content`，总控完成登录/权限校验后返回短时私有 OSS 签名跳转；
+   本地文件仅用于故障回退，不再承载常规的大模型公网下载。
 
 ### 精修任务（Blender auto-refine）
 
@@ -48,7 +52,8 @@
 | 文件 | 职责 |
 |---|---|
 | `server/config.py` | 全部 env 配置：OSS 凭据、worker 模式/token、后端路径（Windows/Linux 探测） |
-| `server/storage.py` | `OssStorage`（上传/下载/签名 URL/存在性）+ `Storage` 门面；未配置 OSS 时现有行为不变 |
+| `server/storage.py` | `OssStorage`（内网上传、公网签名、大小校验）+ `Storage` 门面；未配置 OSS 时保留本地模式 |
+| `server/artifacts.py` | 最终制品“先上传校验、后入库”的统一契约与投递元数据 |
 | `server/pipeline.py` | 与存储/网络无关的流水线执行器：`STAGES`、`glb_info`、`run_pipeline`（`Reporter` 回调 + 注入 backend callable） |
 | `server/backends.py` | Hunyuan/SF3D/TripoSR/Blender 的子进程适配器，路径从 `config` 读取 |
 | `server/worker.py` | 本地 worker：`_DbReporter` 把 SQLite/SSE 副作用接到 `run_pipeline` |

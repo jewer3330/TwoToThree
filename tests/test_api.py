@@ -77,6 +77,23 @@ def test_project_validation_and_job_contract(monkeypatch,tmp_path):
         assert client.post(f'/api/jobs/{jid}/confirm-geometry').status_code==409
         assert len(snapshot['stages'])==6
         assert any(a['mimeType']=='model/gltf-binary' for a in snapshot['artifacts'])
+        model=next(a for a in snapshot['artifacts'] if a['label']=='web.glb')
+        assert model['url']==f"/api/artifacts/{model['id']}/content"
+        local_content=client.get(model['url'])
+        assert local_content.status_code==200
+        assert local_content.headers['x-artifact-delivery']=='local'
+        from server.core import db,dump
+        with db() as con:
+            con.execute('UPDATE artifacts SET metadata=? WHERE id=?',(dump({'storageBackend':'oss','objectKey':'artifacts/aa/test.glb'}),model['id']))
+        class FakeOss:
+            def sign_get(self,key,expires):
+                assert key=='artifacts/aa/test.glb' and expires==600
+                return 'https://print-3d.oss-cn-shanghai.aliyuncs.com/signed-test'
+        monkeypatch.setattr(main.storage,'_oss',FakeOss())
+        redirect=client.get(model['url'],follow_redirects=False)
+        assert redirect.status_code==302
+        assert redirect.headers['x-artifact-delivery']=='oss'
+        assert redirect.headers['location'].startswith('https://print-3d.oss-cn-shanghai.aliyuncs.com/')
         version=client.get(f'/api/projects/{pid}/versions').json()[0]
         assert client.post(f"/api/versions/{version['id']}/accept",json={'notes':''}).status_code==200
         refinement=client.post('/api/refinement/jobs',json={'sourceVersionId':version['id'],'modules':['geometryRepair','webOptimization','visualReview'],'instructions':'修正轮廓'})

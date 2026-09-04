@@ -1,9 +1,8 @@
-"""存储门面：本地磁盘（总控缓存/服务源） + OSS（共享存储 / 交换层）。
+"""存储门面：本地缓存 + OSS 交换层和最终制品源。
 
 约定：
-  - 总控的本地磁盘仍是数据的权威来源与服务来源（URL 指向 /data/...）。
-  - 配置了 OSS 后，输入素材与产物会经 OSS 中转：总控上传输入、显卡机下载输入，
-    显卡机上传产物、总控下载产物落回本地缓存。
+  - STORAGE_BACKEND=oss 时，最终制品先按内容哈希上传 OSS，再允许任务完成。
+  - 总控本地文件保留为缓存/故障兜底，不再是浏览器大文件的默认来源。
   - 未配置 OSS 时（默认单机模式），本模块不参与任何路径，现有行为不变。
 """
 from __future__ import annotations
@@ -27,15 +26,25 @@ class OssStorage:
             raise StorageError("缺少 oss2 依赖，请先 `pip install oss2`") from exc
         self._oss2 = oss2
         auth = oss2.Auth(config.OSS_ACCESS_KEY_ID, config.OSS_ACCESS_KEY_SECRET)
-        self.bucket = oss2.Bucket(auth, config.OSS_ENDPOINT, config.OSS_BUCKET)
+        transfer_endpoint = config.OSS_INTERNAL_ENDPOINT or config.OSS_ENDPOINT
+        self.bucket = oss2.Bucket(auth, transfer_endpoint, config.OSS_BUCKET)
+        public_endpoint = config.OSS_PUBLIC_ENDPOINT or config.OSS_ENDPOINT
+        self._public_bucket = oss2.Bucket(auth, public_endpoint, config.OSS_BUCKET,
+                                          is_cname=bool(config.OSS_PUBLIC_ENDPOINT))
 
     def key(self, oss_path: str) -> str:
         path = oss_path.strip("/")
         return f"{config.OSS_PREFIX}/{path}" if config.OSS_PREFIX else path
 
-    def upload(self, local_path: Path, oss_path: str) -> str:
+    def upload(self, local_path: Path, oss_path: str, *, mime_type: str | None = None) -> str:
         key = self.key(oss_path)
-        self.bucket.put_object_from_file(key, str(local_path))
+        headers = {
+            "Cache-Control": "public, max-age=31536000, immutable",
+            "Content-Disposition": f'inline; filename="{local_path.name.replace(chr(34), "")}"',
+        }
+        if mime_type:
+            headers["Content-Type"] = mime_type
+        self.bucket.put_object_from_file(key, str(local_path), headers=headers)
         return key
 
     def download(self, oss_path: str, local_path: Path) -> Path:
@@ -49,23 +58,29 @@ class OssStorage:
         except Exception:
             return False
 
+    def size(self, oss_path: str) -> int | None:
+        try:
+            return int(self.bucket.head_object(self.key(oss_path)).content_length)
+        except Exception:
+            return None
+
     def sign_get(self, oss_path: str, expires: int | None = None) -> str:
         key = self.key(oss_path)
         expiry = expires or config.OSS_URL_EXPIRES
         try:
-            return self.bucket.sign_url("GET", key, expiry, slash_safe=True)
+            return self._public_bucket.sign_url("GET", key, expiry, slash_safe=True)
         except TypeError:
             # 旧版 oss2 没有 slash_safe 参数。
-            return self.bucket.sign_url("GET", key, expiry)
+            return self._public_bucket.sign_url("GET", key, expiry)
 
     def sign_put(self, oss_path: str, expires: int | None = None) -> str:
         """生成 PUT 签名 URL，供节点端 curl 直传产物到 OSS。"""
         key = self.key(oss_path)
         expiry = expires or config.OSS_URL_EXPIRES
         try:
-            return self.bucket.sign_url("PUT", key, expiry, slash_safe=True)
+            return self._public_bucket.sign_url("PUT", key, expiry, slash_safe=True)
         except TypeError:
-            return self.bucket.sign_url("PUT", key, expiry)
+            return self._public_bucket.sign_url("PUT", key, expiry)
 
 
 def resolve_transfer_backend(node_cfg: dict | None = None) -> str:
@@ -111,6 +126,19 @@ class Storage:
                 raise StorageError(f"OSS 初始化失败：{self._reason}")
             raise StorageError("OSS 未配置（缺少 OSS_BUCKET / OSS_ACCESS_KEY_ID / OSS_ACCESS_KEY_SECRET）")
         return self._oss
+
+    def store_artifact(self, local_path: Path, digest: str, mime_type: str) -> str:
+        """上传内容寻址的最终制品，返回不含全局 OSS_PREFIX 的逻辑对象键。"""
+        suffix = local_path.suffix.lower()
+        logical_key = f"{config.OSS_ARTIFACT_PREFIX}/{digest[:2]}/{digest}{suffix}"
+        oss = self.oss()
+        expected = local_path.stat().st_size
+        if oss.size(logical_key) != expected:
+            oss.upload(local_path, logical_key, mime_type=mime_type)
+        actual = oss.size(logical_key)
+        if actual != expected:
+            raise StorageError(f"OSS 制品校验失败：expected={expected}, actual={actual}")
+        return logical_key
 
 
 storage = Storage()

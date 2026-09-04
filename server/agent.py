@@ -185,20 +185,28 @@ def _run_job(job_id:str,config:dict)->dict:
 # v2：命令执行（控制面经 WS 下发 argv，节点本地 subprocess 跑，逐行回传）
 # --------------------------------------------------------------------------- #
 def _run_command(argv:list[str], cwd:str|None, log_line, timeout:int):
-    """同步执行 argv 并逐行 log。返回 (exit_code, error)。"""
+    """同步执行 argv 并逐行 log。返回 (exit_code, error)。
+
+    防孤儿要点：stdout 用独立线程泵读，主线程 proc.wait(timeout) 才能真实
+    触发超时——若像旧版那样同步 for 读 stdout，进程持续输出时超时检查永远
+    不可达，taskkill 形同虚设，控制面判死后节点进程仍白跑占 GPU。
+    """
     import subprocess
+    import threading
     proc=subprocess.Popen(argv,cwd=cwd,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,
                           text=True,encoding='utf-8',errors='replace',bufsize=1)
-    assert proc.stdout
-    for line in proc.stdout:
-        line=line.rstrip('\n')
-        if line and ('%|' not in line or '100%' in line):
-            log_line(line)
+    def pump():
+        assert proc.stdout
+        for line in proc.stdout:
+            line=line.rstrip('\n')
+            if line and ('%|' not in line or '100%' in line):
+                log_line(line)
+    threading.Thread(target=pump,daemon=True).start()
     try:
         proc.wait(timeout=timeout)
         return proc.returncode, None
     except subprocess.TimeoutExpired:
-        # 超时必须终止子进程，避免孤儿进程继续占用 GPU/写产物
+        # 超时必须终止子进程树，避免孤儿进程继续占用 GPU/写产物
         # （控制面已判失败，遗留产物会造成下一次同路径脏数据）。
         try:
             if os.name == 'nt':

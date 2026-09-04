@@ -167,36 +167,29 @@ def check_control() -> list[dict]:
         sqlite_ok, sqlite_val = False, str(exc)
     checks.append(_check("sqlite", "SQLite 数据目录可写", sqlite_ok, sqlite_val))
 
-    # OSS 凭据（仅 prod 必须；dev 环境隔离为不配置）
+    # OSS 凭据：prod 必须；dev 可显式切 OSS 验收，但必须使用独立 dev 前缀。
     oss_configured = all(_env(k) for k in ("OSS_ACCESS_KEY_ID", "OSS_ACCESS_KEY_SECRET", "OSS_BUCKET"))
-    if (_env("SITE_ROLE", "prod") or "prod").strip().lower() == "dev":
-        checks.append(_check("oss", "OSS 凭据（dev 不应配置）", True,
-                             "已配置" if oss_configured else "未配置（正确）",
-                             "开发环境隔离：不应持有生产 OSS 凭据"))
+    site_role = (_env("SITE_ROLE", "prod") or "prod").strip().lower()
+    storage_backend = (_env("STORAGE_BACKEND", "auto") or "auto").strip().lower()
+    public_endpoint = _env("OSS_PUBLIC_ENDPOINT", "").strip()
+    oss_prefix = _env("OSS_PREFIX", "two-to-three").strip("/")
+    if site_role == "dev":
+        dev_oss = storage_backend == "oss"
+        checks.append(_check("backend_policy", "开发传输策略",
+                             storage_backend in {"cdn", "oss"}, storage_backend,
+                             "dev 可用 cdn；切 oss 验收时必须配置凭据和独立 dev 前缀"))
+        checks.append(_check("oss", "开发 OSS 配置",
+                             (oss_configured and "/dev" in f"/{oss_prefix}") if dev_oss else not oss_configured,
+                             f"bucket={_env('OSS_BUCKET') or '未设置'}, prefix={oss_prefix}",
+                             "OSS 模式必须凭据完整且 OSS_PREFIX 含 dev；CDN 模式不得残留 OSS 凭据"))
+        checks.append(_check("oss_endpoint", "开发 OSS 域名",
+                             not dev_oss or not public_endpoint or ".aliyuncs.com" in public_endpoint,
+                             public_endpoint or "默认 bucket.endpoint",
+                             "阿里 OSS 验收应使用官方 .aliyuncs.com 域名"))
     else:
         checks.append(_check("oss", "OSS 凭据完整（prod 必须）", oss_configured,
                              _env("OSS_BUCKET") or "未设置",
                              "正式线 OSS_ACCESS_KEY_ID/SECRET/BUCKET 三者须齐备"))
-
-    # 传输策略环境硬隔离（不可选）：
-    #   prod —— 只能阿里 OSS（STORAGE_BACKEND=oss），自家 CDN 视为阻断
-    #   dev  —— 只能自家 CDN（STORAGE_BACKEND=cdn），配置生产 OSS 凭据视为阻断
-    site_role = (_env("SITE_ROLE", "prod") or "prod").strip().lower()
-    storage_backend = (_env("STORAGE_BACKEND", "auto") or "auto").strip().lower()
-    public_endpoint = _env("OSS_PUBLIC_ENDPOINT", "").strip()
-    if site_role == "dev":
-        checks.append(_check("backend_policy", "传输必须自家 CDN（dev）",
-                             storage_backend == "cdn", storage_backend,
-                             "开发环境只能 STORAGE_BACKEND=cdn，禁止 oss"))
-        checks.append(_check("oss_forbidden", "开发环境禁止配置阿里 OSS 凭据",
-                             not oss_configured,
-                             "已配置" if oss_configured else "未配置",
-                             "环境隔离：开发机不得持有生产 OSS 凭据（避免污染生产 bucket）"))
-        checks.append(_check("oss_endpoint", "开发 OSS 公网域名不得为阿里域名",
-                             not public_endpoint or "aliyuncs.com" not in public_endpoint,
-                             public_endpoint or "未配置",
-                             "dev 的 OSS_PUBLIC_ENDPOINT 不应指向阿里 OSS"))
-    else:
         checks.append(_check("backend_policy", "传输强制阿里 OSS（prod）",
                              storage_backend == "oss", storage_backend,
                              "正式线必须 STORAGE_BACKEND=oss；auto/cdn 都会走到非 OSS 路径"))

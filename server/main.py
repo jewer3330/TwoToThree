@@ -6,7 +6,7 @@ from typing import Any,Literal
 import psutil
 from fastapi import FastAPI,File,HTTPException,Query,Request,UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse,JSONResponse,Response,StreamingResponse
+from fastapi.responses import FileResponse,JSONResponse,RedirectResponse,Response,StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 from PIL import Image,ImageDraw,UnidentifiedImageError
@@ -23,6 +23,9 @@ from .style_presets import DEFAULT_STYLE, public_style_presets, style_preset
 from . import auth
 from . import autodl
 from . import oss
+from . import config as runtime_config
+from .artifacts import delivery_info,prepare_artifact
+from .storage import StorageError,storage
 
 
 def _execution_mode() -> str:
@@ -219,7 +222,28 @@ def project_json(r):
 def asset_json(r):
     d=dict(r);return {'id':d['id'],'role':d['role'],'originalName':d['original_name'],'mimeType':d['mime_type'],'byteSize':d['byte_size'],'width':d['width'],'height':d['height'],'sha256':d['sha256'],'active':bool(d['active']),'url':'/'+d['storage_path'].replace('\\','/')}
 def artifact_json(r):
-    d=dict(r);return {'id':d['id'],'type':d['type'],'label':d['label'],'url':'/'+d['storage_path'].replace('\\','/'),'mimeType':d['mime_type'],'byteSize':d['byte_size'],'sha256':d['sha256'],'metadata':load(d['metadata'],{})}
+    d=dict(r);metadata=load(d['metadata'],{})
+    return {'id':d['id'],'type':d['type'],'label':d['label'],'url':f"/api/artifacts/{d['id']}/content",'mimeType':d['mime_type'],'byteSize':d['byte_size'],'sha256':d['sha256'],'delivery':metadata.get('storageBackend','local'),'metadata':metadata}
+
+@app.get('/api/artifacts/{artifact_id}/content')
+def artifact_content(artifact_id:str):
+    """鉴权后签发私有 OSS 下载；未迁移的旧制品安全回退本地缓存。"""
+    if not re.fullmatch(r'(?:art|rart)_[a-f0-9]{16}',artifact_id):raise HTTPException(404,'制品不存在')
+    with db() as con:
+        row=con.execute('SELECT id,storage_path,mime_type,metadata FROM artifacts WHERE id=?',(artifact_id,)).fetchone()
+        if not row:row=con.execute('SELECT id,storage_path,mime_type,metadata FROM refinement_artifacts WHERE id=?',(artifact_id,)).fetchone()
+    if not row:raise HTTPException(404,'制品不存在')
+    backend,object_key=delivery_info(row)
+    if backend=='oss' and object_key:
+        try:
+            signed=storage.oss().sign_get(object_key,runtime_config.OSS_DOWNLOAD_EXPIRES)
+            return RedirectResponse(signed,status_code=302,headers={'Cache-Control':'private, no-store','X-Artifact-Delivery':'oss'})
+        except StorageError:
+            pass
+    path=resolve_storage(row['storage_path'])
+    if not path.is_file():raise HTTPException(503,'制品当前不可用')
+    delivery='local-fallback' if backend=='oss' else 'local'
+    return FileResponse(path,media_type=row['mime_type'],headers={'Cache-Control':'private, max-age=3600','Content-Disposition':f'inline; filename="{path.name}"','X-Artifact-Delivery':delivery})
 def get_project(pid):
     with db() as con:r=con.execute('SELECT * FROM projects WHERE id=?',(pid,)).fetchone()
     if not r:raise HTTPException(404,'项目不存在')
@@ -672,11 +696,12 @@ def run_refinement(jid):
         if 'webOptimization' in states and (not gates.get('triangleBudget',False) or not gates.get('sizeBudget',False) or not gates.get('glbValid',False) or not gates.get('volumeSafe',True)):states['webOptimization']='failed'
         if 'visualReview' in states and not gates.get('rendersComplete',False):states['visualReview']='failed'
         stamp=now();status='awaiting_review' if result['status']=='passed' else 'quality_failed'
+        files=[('glb','refined.glb',root/'refined.glb','model/gltf-binary'),('quality_report','quality-report.json',root/'quality-report.json','application/json'),('config','config-snapshot.json',config_path,'application/json')]+[('texture',f'{n}.png',root/'textures'/f'{n}.png','image/png') for n in ('base-color','roughness','metallic','normal','ao')]+[('render',f'{n}.png',root/f'{n}.png','image/png') for n in ('front','left-three-quarter','side','back')]
+        prepared=[(kind,label,mime,prepare_artifact(path,mime,{'sourceVersionId':d['source_version_id']})) for kind,label,path,mime in files if path.exists()]
         with db() as con:
             con.execute('INSERT INTO versions VALUES(?,?,?,?,?,?,?)',(out_vid,d['project_id'],number,f'v{number:03d} · Blender 自动精修','ready_for_review' if status=='awaiting_review' else 'quality_failed',dump(result),stamp));con.execute('INSERT INTO version_links VALUES(?,?,?,?,?)',(uid('vln'),d['source_version_id'],out_vid,jid,stamp))
-            files=[('glb','refined.glb',root/'refined.glb','model/gltf-binary'),('quality_report','quality-report.json',root/'quality-report.json','application/json'),('config','config-snapshot.json',config_path,'application/json')]+[('texture',f'{n}.png',root/'textures'/f'{n}.png','image/png') for n in ('base-color','roughness','metallic','normal','ao')]+[('render',f'{n}.png',root/f'{n}.png','image/png') for n in ('front','left-three-quarter','side','back')]
-            for kind,label,path,mime in files:
-                if path.exists():con.execute('INSERT INTO refinement_artifacts VALUES(?,?,?,?,?,?,?,?,?,?,?)',(uid('rart'),jid,out_vid,kind,label,storage_path(path),mime,path.stat().st_size,sha256(path),dump({'sourceVersionId':d['source_version_id']}),stamp))
+            for kind,label,mime,(rel,size,digest,meta) in prepared:
+                con.execute('INSERT INTO refinement_artifacts VALUES(?,?,?,?,?,?,?,?,?,?,?)',(uid('rart'),jid,out_vid,kind,label,rel,mime,size,digest,meta,stamp))
             con.execute('UPDATE refinement_jobs SET output_version_id=?,status=?,module_states=?,logs=?,completed_at=?,blender_version=?,quality_report=? WHERE id=?',(out_vid,status,dump(states),dump(logs),stamp,result.get('blenderVersion'),dump(result),jid));con.execute('UPDATE projects SET status=?,updated_at=? WHERE id=?',('ready_for_review' if status=='awaiting_review' else 'quality_failed',stamp,d['project_id']))
     except CancelledError as exc:
         with db() as con:con.execute("UPDATE refinement_jobs SET status='cancelled',logs=?,completed_at=?,error_summary=? WHERE id=?",(dump(logs),now(),str(exc),jid))
@@ -857,12 +882,13 @@ def run_revision(rid):
         generate_hunyuan(resolve_storage(asset['storage_path']),raw,seed,quality,log,cancelled)
         refdir=root/'blender';refdir.mkdir();cfg={'modules':['geometryRepair','uvUnwrap','pbrMaterials','webOptimization','visualReview'],'instructions':'Reference Set candidate post-processing','geometryRepairStrength':'conservative','uvStrategy':'preserve_or_smart','uvIslandMargin':.03,'materialTemplate':'preserve_source','textureMode':'preserve_source','projectionCalibration':None,'targetTriangleRange':[20000,120000],'textureResolution':2048,'maxWebGlbMB':20,'preserveThickness':True,'maxThicknessLoss':.08,'maxDecimationPerPass':.2,'minThinAxisRatio':.08};cfg_path=root/'blender-config.json';cfg_path.write_text(json.dumps(cfg,ensure_ascii=False),encoding='utf-8');result=refine_blender(raw,refdir,cfg_path,log,cancelled,resolve_storage(asset['storage_path']))
         out=uid('ver');stamp=now();status='awaiting_review' if result.get('status')=='passed' else 'quality_failed'
+        files=[('glb','candidate-refined.glb',refdir/'refined.glb','model/gltf-binary')]+[('render',f'{v}.png',refdir/f'{v}.png','image/png') for v in ('front','left-three-quarter','side','back')]
+        prepared=[(kind,label,mime,prepare_artifact(path,mime,{'revisionRequestId':rid})) for kind,label,path,mime in files if path.exists()]
         with db() as con:
             con.execute('INSERT INTO versions VALUES(?,?,?,?,?,?,?)',(out,r['project_id'],number,f'v{number:03d} · Reference Set 候选重生成','ready_for_review' if status=='awaiting_review' else 'quality_failed',dump(result),stamp))
             jid=uid('ref');con.execute('INSERT INTO refinement_jobs(id,project_id,source_version_id,output_version_id,status,config,module_states,logs,created_at,started_at,completed_at,blender_version,quality_report) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',(jid,r['project_id'],r['source_version_id'],out,status,dump(cfg),dump({m:'passed' for m in cfg['modules']}),dump(logs),r['created_at'],r['started_at'],stamp,result.get('blenderVersion'),dump(result)));con.execute('INSERT INTO version_links VALUES(?,?,?,?,?)',(uid('vln'),r['source_version_id'],out,jid,stamp))
-            files=[('glb','candidate-refined.glb',refdir/'refined.glb','model/gltf-binary')]+[('render',f'{v}.png',refdir/f'{v}.png','image/png') for v in ('front','left-three-quarter','side','back')]
-            for kind,label,path,mime in files:
-                if path.exists():con.execute('INSERT INTO refinement_artifacts VALUES(?,?,?,?,?,?,?,?,?,?,?)',(uid('rart'),jid,out,kind,label,storage_path(path),mime,path.stat().st_size,sha256(path),dump({'revisionRequestId':rid}),stamp))
+            for kind,label,mime,(rel,size,digest,meta) in prepared:
+                con.execute('INSERT INTO refinement_artifacts VALUES(?,?,?,?,?,?,?,?,?,?,?)',(uid('rart'),jid,out,kind,label,rel,mime,size,digest,meta,stamp))
             con.execute('UPDATE revision_requests SET output_version_id=?,status=?,completed_at=? WHERE id=?',(out,status,stamp,rid));con.execute('UPDATE revision_comment_links SET output_version_id=? WHERE revision_request_id=?',(out,rid));con.execute("UPDATE version_comments SET status='awaiting_review',updated_at=? WHERE id IN (SELECT comment_id FROM revision_comment_links WHERE revision_request_id=?)",(stamp,rid))
     except CancelledError as exc:
         with db() as con:con.execute("UPDATE revision_requests SET status='cancelled',completed_at=?,error_summary=? WHERE id=?",(now(),str(exc),rid));con.execute("UPDATE version_comments SET status='open',updated_at=? WHERE id IN (SELECT comment_id FROM revision_comment_links WHERE revision_request_id=?)",(now(),rid))

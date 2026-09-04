@@ -25,6 +25,9 @@ def _env(name: str, default: str | None = None) -> str | None:
 # OSS（共享存储 / 交换层）
 # --------------------------------------------------------------------------- #
 OSS_ENDPOINT = _env("OSS_ENDPOINT", "oss-cn-shanghai.aliyuncs.com")
+# 控制面与 OSS 同地域时走内网端点上传/校验，浏览器签名仍使用公网端点。
+OSS_INTERNAL_ENDPOINT = _env("OSS_INTERNAL_ENDPOINT", "")
+OSS_PUBLIC_ENDPOINT = _env("OSS_PUBLIC_ENDPOINT", "")
 OSS_BUCKET = _env("OSS_BUCKET", "")
 OSS_ACCESS_KEY_ID = _env("OSS_ACCESS_KEY_ID", "")
 OSS_ACCESS_KEY_SECRET = _env("OSS_ACCESS_KEY_SECRET", "")
@@ -32,6 +35,10 @@ OSS_ACCESS_KEY_SECRET = _env("OSS_ACCESS_KEY_SECRET", "")
 OSS_PREFIX = (_env("OSS_PREFIX", "two-to-three") or "").strip("/")
 # 签名 URL 有效期（秒）。
 OSS_URL_EXPIRES = int(_env("OSS_URL_EXPIRES", "3600") or "3600")
+# 浏览器下载使用更短的签名，API 每次访问时按权限即时生成。
+OSS_DOWNLOAD_EXPIRES = int(_env("OSS_DOWNLOAD_EXPIRES", "600") or "600")
+# 最终制品使用内容寻址键，和 GPU 临时交换对象分开。
+OSS_ARTIFACT_PREFIX = (_env("OSS_ARTIFACT_PREFIX", "artifacts") or "artifacts").strip("/")
 
 
 # --------------------------------------------------------------------------- #

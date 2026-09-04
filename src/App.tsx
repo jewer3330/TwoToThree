@@ -1,28 +1,28 @@
 import {Activity, ArrowLeft, Boxes, ChevronRight, Cpu, FolderKanban, Gauge, HardDrive, Home, Layers3, LogOut, Menu, Plus, Printer as PrinterIcon, Scissors, Search, Settings, SlidersHorizontal, Sparkles} from 'lucide-react';
 import {Link, NavLink, Navigate, Route, Routes, useLocation, useNavigate} from 'react-router-dom';
-import {useEffect,useState} from 'react';
+import {lazy,Suspense,useEffect,useState} from 'react';
 import {api,type AuthUser} from './api';
-import Dashboard from './pages/Dashboard';
-import CreateProject from './pages/CreateProject';
-import ValidationPage from './pages/ValidationPage';
-import PlanPage from './pages/PlanPage';
-import MonitorPage from './pages/MonitorPage';
-import ReviewPage from './pages/ReviewPage';
-import RefinementConfigPage from './pages/RefinementConfigPage';
-import RefinementMonitorPage from './pages/RefinementMonitorPage';
-import RevisionPlanPage from './pages/RevisionPlanPage';
-import RevisionMonitorPage from './pages/RevisionMonitorPage';
-import DetailPlanPage from './pages/DetailPlanPage';
-import DetailJobPage from './pages/DetailJobPage';
-import PartsLabPage from './pages/PartsLabPage';
-import PartsGeneratePage from './pages/PartsGeneratePage';
-import PartsAssemblyPage from './pages/PartsAssemblyPage';
-import PartsComparePage from './pages/PartsComparePage';
-import GpuConsolePage from './pages/GpuConsolePage';
-import PrinterConsolePage from './pages/PrinterConsolePage';
-import PrintWorkflowPage from './pages/PrintWorkflowPage';
-import SettingsPage from './pages/SettingsPage';
-import LandingPage from './pages/LandingPage';
+const Dashboard=lazy(()=>import('./pages/Dashboard'));
+const CreateProject=lazy(()=>import('./pages/CreateProject'));
+const ValidationPage=lazy(()=>import('./pages/ValidationPage'));
+const PlanPage=lazy(()=>import('./pages/PlanPage'));
+const MonitorPage=lazy(()=>import('./pages/MonitorPage'));
+const ReviewPage=lazy(()=>import('./pages/ReviewPage'));
+const RefinementConfigPage=lazy(()=>import('./pages/RefinementConfigPage'));
+const RefinementMonitorPage=lazy(()=>import('./pages/RefinementMonitorPage'));
+const RevisionPlanPage=lazy(()=>import('./pages/RevisionPlanPage'));
+const RevisionMonitorPage=lazy(()=>import('./pages/RevisionMonitorPage'));
+const DetailPlanPage=lazy(()=>import('./pages/DetailPlanPage'));
+const DetailJobPage=lazy(()=>import('./pages/DetailJobPage'));
+const PartsLabPage=lazy(()=>import('./pages/PartsLabPage'));
+const PartsGeneratePage=lazy(()=>import('./pages/PartsGeneratePage'));
+const PartsAssemblyPage=lazy(()=>import('./pages/PartsAssemblyPage'));
+const PartsComparePage=lazy(()=>import('./pages/PartsComparePage'));
+const GpuConsolePage=lazy(()=>import('./pages/GpuConsolePage'));
+const PrinterConsolePage=lazy(()=>import('./pages/PrinterConsolePage'));
+const PrintWorkflowPage=lazy(()=>import('./pages/PrintWorkflowPage'));
+const SettingsPage=lazy(()=>import('./pages/SettingsPage'));
+const LandingPage=lazy(()=>import('./pages/LandingPage'));
 
 // 后台功能可见性：管理员组由后端 /me 返回（按 OIDC 用户组判定，非硬编码 role）。
 function isAdmin(user:AuthUser):boolean{
@@ -61,7 +61,7 @@ function LoginPage(){const params=new URLSearchParams(location.search);const ret
 
 function Shell({user}:{user:AuthUser}){const loc=useLocation(); const focused=/\/(create|validation|plan|jobs|review|refinement|revisions|detail-plans|detail-jobs)(\/|$)/.test(loc.pathname);const logout=()=>{location.assign('/api/auth/logout?return_to='+encodeURIComponent('/'))};return <div className={`shell ${focused?'focused':''}`}>
   {!focused&&<aside className="sidebar"><div className="brand"><span className="brandmark"><Sparkles/></span><div><b>2D→3D Studio</b><small>生产工作台</small></div></div><nav>{nav.filter(([, , ,admin])=>!admin||isAdmin(user)).map(([to,I,label])=><NavLink key={to} to={to} end={to==='/' }><I/>{label}</NavLink>)}</nav><div className="sidebar-foot"><span className="health-dot"/> {user.name} · {isAdmin(user)?'管理员':'用户'} <button type="button" onClick={logout} title="退出登录"><LogOut size={15}/></button></div></aside>}
-  <section className="workspace"><header className="topbar"><div className="mobile-brand"><Menu/> 2D→3D Studio</div><div className="search"><Search/><span>搜索项目、任务或素材</span><kbd>⌘ K</kbd></div><div className="system-strip"><span><Activity/> 系统 <b>正常</b></span><span><Cpu/> GPU <b>就绪</b></span><span><Gauge/> CPU <b>24%</b></span><span><HardDrive/> 存储 <b>68%</b></span></div></header><Breadcrumbs/><main><Routes>
+  <section className="workspace"><header className="topbar"><div className="mobile-brand"><Menu/> 2D→3D Studio</div><div className="search"><Search/><span>搜索项目、任务或素材</span><kbd>⌘ K</kbd></div><div className="system-strip"><span><Activity/> 系统 <b>正常</b></span><span><Cpu/> GPU <b>就绪</b></span><span><Gauge/> CPU <b>24%</b></span><span><HardDrive/> 存储 <b>68%</b></span></div></header><Breadcrumbs/><main><Suspense fallback={<div className="loading"><span/>正在加载页面…</div>}><Routes>
     <Route path="/" element={<Dashboard/>}/><Route path="/create" element={<CreateProject/>}/><Route path="/validation/:projectId" element={<ValidationPage/>}/><Route path="/plan/:projectId" element={<PlanPage/>}/><Route path="/jobs/:jobId" element={<MonitorPage/>}/><Route path="/review/:projectId" element={<ReviewPage/>}/>
     <Route path="/refinement/new/:versionId" element={<RefinementConfigPage/>}/><Route path="/refinement/jobs/:jobId" element={<RefinementMonitorPage/>}/>
     <Route path="/revisions/new/:versionId" element={<RevisionPlanPage/>}/><Route path="/revisions/:revisionId" element={<RevisionMonitorPage/>}/>
@@ -72,9 +72,9 @@ function Shell({user}:{user:AuthUser}){const loc=useLocation(); const focused=/\
     <Route path="/parts-lab/compare/:partId" element={<PartsComparePage/>}/>
     <Route path="/parts-lab/*" element={<PartsLabPage/>}/>
     <Route path="/projects" element={<Dashboard/>}/><Route path="/assets" element={<Placeholder title="素材管理"/>}/><Route path="/queue" element={<Placeholder title="任务队列"/>}/><Route path="/gpu" element={isAdmin(user)?<GpuConsolePage/>:<Navigate to="/"/>}/><Route path="/printer" element={isAdmin(user)?<PrinterConsolePage/>:<Navigate to="/"/>}/><Route path="/print-workflow" element={<PrintWorkflowPage/>}/><Route path="/library" element={<Placeholder title="模型 / 资产库"/>}/><Route path="/settings" element={isAdmin(user)?<SettingsPage/>:<Navigate to="/"/>}/><Route path="*" element={<Navigate to="/"/>}/>
-  </Routes></main></section>
+  </Routes></Suspense></main></section>
 </div>}
-export default function App(){const [user,setUser]=useState<AuthUser|null|undefined>(undefined);useEffect(()=>{api.me().then(setUser).catch(()=>setUser(null))},[]);if(location.pathname==='/login')return <LoginPage/>;if(user===undefined)return <div className="empty"><Activity/><p>正在验证登录状态…</p></div>;if(!user)return <LandingPage/>;return <Shell user={user}/>}
+export default function App(){const [user,setUser]=useState<AuthUser|null|undefined>(undefined);useEffect(()=>{api.me().then(setUser).catch(()=>setUser(null))},[]);if(location.pathname==='/login')return <LoginPage/>;if(user===undefined)return <div className="empty"><Activity/><p>正在验证登录状态…</p></div>;if(!user)return <Suspense fallback={<div className="empty"><Activity/><p>正在加载首页…</p></div>}><LandingPage/></Suspense>;return <Shell user={user}/>}
 
 export function PageHeader({eyebrow,title,description,action}:{eyebrow?:string;title:string;description?:string;action?:React.ReactNode}){return <div className="page-header"><div>{eyebrow&&<span className="eyebrow">{eyebrow}</span>}<h1>{title}</h1>{description&&<p>{description}</p>}</div>{action}</div>}
 export function Button({children,kind='primary',...props}:React.ButtonHTMLAttributes<HTMLButtonElement>&{kind?:'primary'|'secondary'|'danger'|'success'}){return <button className={`button ${kind}`} {...props}>{children}<ChevronRight size={16}/></button>}
