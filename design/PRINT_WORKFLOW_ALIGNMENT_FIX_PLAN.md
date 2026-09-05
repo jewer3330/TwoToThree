@@ -82,3 +82,18 @@
 - [ ] 观察设备接受命令、进入准备/运行、首层完成；实物打印完成后才关闭验收。
 
 协议参考：[OpenBambuAPI project_file](https://github.com/PhilosophersStone/openbambuapi/blob/main/mqtt.md)。
+
+### 交付与反向验证（续）
+
+- [x] 通过设备摄像头读取现场：纹理板，无成品占位；已用实际 PLA Basic 完整继承预设重新切片，修正旧切片密度为 0、Cool Plate 35°C 的配置问题。
+- [x] 20mm 同模型验收切片：100 层，纹理板 65°C、喷嘴 220°C、密度 1.26，树状支撑和 brim；预计 18 分 30 秒，黄色 AMS 槽位索引 3。
+- [x] 网页补齐首次导出、切片导入、AMS 槽位选择；模型上传返回完整任务，模型/颜色变更使旧切片失效；发送操作互斥并记录启动状态以阻止重复任务。
+- [x] 新 API 校验真实切片包；11 项针对性回归通过，此前完整后端 76 passed / 1 skipped，前端 2 passed、构建通过。
+- [x] 实机上传 4027304 bytes 成功；设备回执明确为 `err_code=84033543`。已修复只有错误码、没有 result 字段时被误判为超时的问题。
+- [ ] 实物首层/完成：设备拒绝未通过签名验证的启动命令。通过已授权 Bambu 客户端启动的替代路径受桌面控制权限未授予阻挡；没有禁用设备认证，也没有使用第三方提取的签名密钥。
+- [x] 正式服独立发布至 `/opt/two-to-three-releases/print-45a3005-20260905`；原工作目录完整保存在 `/opt/two-to-three-backup-print-45a3005-20260905`，数据备份 `/opt/print-data-backup-print-45a3005-20260905.tar.gz`。
+- [x] 正式服本机 API 验收：健康 200、匿名 401、登录 303、模型上传 201、非法切片 422、切片导入 201、测试数据清理 204；生产 GPU `gpu-4060-prod` 已重新上线。
+- [ ] 正式公网 HTTPS：Cloudflare 返回 525；源站本机 HTTPS 校验证书成功、API 200，公网直连携带域名的 TLS 被重置。尚未定位到可安全修改的网络配置，不能宣称公网验收通过。
+- [x] 内网 Git `origin/printworld-all` 与 GitHub fork `jewer3330/TwoToThree:printworld-all` 已推送；曹涵之仓库直接 push 返回 403，走现有 fork 提交路径。
+
+验收脚本：`scripts/verify_print_release.py`（不启动硬件的 API 验收）、`scripts/verify_real_print_pipeline.py`（真实 Blender 流程）、`scripts/slice_a1_smoke.py`（可复现切片）、`scripts/printer_snapshot.py`（现场图像）。

@@ -72,6 +72,12 @@ def mqtt_send_print(serial:str,ip:str,access_code:str,subtask_name:str,file_md5:
             replies.append({k:report[k] for k in ('sequence_id','result','reason','err_code') if k in report})
         if str(report.get('sequence_id')) != sequence:
             return
+        if report.get('err_code'):
+            error_code=report['err_code']
+            reason=('打印机拒绝未通过签名验证的命令，请通过已授权的 Bambu 软件启动' if error_code==84033543 else f'打印机错误 {error_code}')
+            ok.update(error=reason,errorCode=error_code,sequenceId=sequence)
+            done.set()
+            return
         result=str(report.get('result','')).lower()
         if result in ('success','ok'):
             ok.update(ok=True,accepted=True,started=False,sequenceId=sequence)
