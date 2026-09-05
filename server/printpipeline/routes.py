@@ -23,6 +23,7 @@ class ColorInput(BaseModel):
 class SendInput(BaseModel):
     printerId:str
     startPrint:bool=False   # 是否在上传后直接发送打印命令（需已切片 3MF）
+    amsMapping:list[int]|None=None
 
 @router.get('/jobs')
 def list_jobs():return jobs_mod.list_jobs()
@@ -159,6 +160,15 @@ def send_to_printer(job_id:str,body:SendInput):
     printer=printer_registry.get_printer(body.printerId)
     if not printer:raise HTTPException(404,'打印机不存在')
     local=jobs_mod.job_abs_path(j,'color.preview3mf') or (jobs_mod.job_dir(job_id)/'multicolor.3mf')
+    if body.startPrint:
+        import zipfile
+        if not printer.get('serial'):raise HTTPException(409,'打印机缺少序列号')
+        try:
+            with zipfile.ZipFile(local) as archive:
+                if 'Metadata/plate_1.gcode' not in archive.namelist():
+                    raise HTTPException(409,'文件尚未切片，请先导入已切片 3MF')
+        except zipfile.BadZipFile:
+            raise HTTPException(409,'无效的 3MF 文件')
     # 1) FTP 上传
     try:
         remote_name=send_mod.BambuFTP(printer['ip'],printer['accessCode']).upload(local)
@@ -169,8 +179,9 @@ def send_to_printer(job_id:str,body:SendInput):
     if body.startPrint and printer.get('serial'):
         md5=send_mod.file_md5(local)
         res=send_mod.mqtt_send_print(printer['serial'],printer['ip'],printer['accessCode'],
-                                     j['name'],md5)
+                                     j['name'],md5,remote_name=remote_name,ams_mapping=body.amsMapping)
         result['printCommand']=res
+        result['ok']=res.get('ok',False)
     return result
 
 @router.post('/printers/{printer_id}/print')
@@ -181,6 +192,6 @@ def start_print(printer_id:str,body:dict):
     if not printer.get('serial'):raise HTTPException(409,'打印机缺少序列号')
     res=send_mod.mqtt_send_print(printer['serial'],printer['ip'],printer['accessCode'],
                                  body.get('subtaskName','打印任务'),body.get('md5',''),
-                                 body.get('gcodeParam','Metadata/plate_1.gcode'))
+                                 body.get('gcodeParam','Metadata/plate_1.gcode'),remote_name=body.get('file','multicolor.3mf'),ams_mapping=body.get('amsMapping'))
     if not res.get('ok'):raise HTTPException(502,res.get('error','命令发送失败'))
-    return {'ok':True}
+    return res

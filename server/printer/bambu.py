@@ -26,11 +26,13 @@ class BambuClient:
     def _on_message(self,client,userdata,msg):
         try:
             data=json.loads(msg.payload.decode('utf-8'))
-            self.status=data
+            if not isinstance(data.get('print'),dict):return
+            if self.status is None:self.status={'print':{}}
+            self.status['print'].update(data['print'])
             # 从 topic 提取 serial 备用
             parts=msg.topic.split('/')
             if len(parts)>=2 and parts[1]!='+':self.serial=parts[1]
-            self._done.set()
+            if 'gcode_state' in self.status['print']:self._done.set()
         except Exception:pass
     def fetch(self)->dict:
         """连接并读取一次打印机状态。返回 {'ok':True,'data':{...}} 或 {'ok':False,'error':...}"""
@@ -40,6 +42,10 @@ class BambuClient:
             c=mqtt.Client(mqtt.CallbackAPIVersion.VERSION2,client_id=f'bbl-{int(time.time())}')
             c.tls_set_context(ctx);c.username_pw_set('bblp',self.access_code)
             c.on_connect=self._on_connect;c.on_message=self._on_message
+            def request_full(client,userdata,mid,reasons,props=None):
+                if self.serial:
+                    client.publish(f'device/{self.serial}/request',json.dumps({'pushing':{'sequence_id':'0','command':'pushall','version':1,'push_target':1}}))
+            c.on_subscribe=request_full
             c.connect(self.ip,8883,keepalive=15);self._client=c
             c.loop_start()
             if not self._done.wait(self.timeout):
@@ -58,7 +64,7 @@ def parse_print(data:dict)->dict:
     def num(k,d=0):
         try:return round(float(p.get(k,d)),1)
         except Exception:return d
-    stg=p.get('stg_curr') or p.get('gcode_state') or 'idle'
+    stg=str(p.get('gcode_state') or 'unknown').lower()
     # 空闲但喷嘴/热床仍在高温（预热保温）→ 待机；无 stg_curr 且低温 → 冷待机
     nozzle=num('nozzle_temper')
     if stg in ('idle',None) and nozzle>=50:
@@ -79,7 +85,7 @@ def parse_print(data:dict)->dict:
         'layerNum':int(p.get('layer_num') or 0),
         'totalLayers':int(p.get('total_layer_num') or 0),
         'wifiSignal':p.get('wifi_signal'),
-        'remainingSeconds':int(p.get('mc_remaining_time') or 0),
+        'remainingSeconds':int(float(p.get('mc_remaining_time') or 0)*60),
         'gcodeName':(p.get('subtask_name') or p.get('gcode_file') or ''),
         'fanSpeed':int(p.get('big_fan1_speed') or 0),
         'hms':p.get('hms',[]),

@@ -69,3 +69,16 @@
 - [x] FTP 上传接口返回 HTTP 200；随后 MQTT `project_file` 启动命令返回 `ok=true`。
 - [ ] 设备回读仍为 `idle`，未观察到 `running/progress` 状态，因此本次记为“已上传并发出启动命令，但设备未确认开始打印”，不宣称实物打印已启动。
 - 风险：设备端可能需要在屏幕“我的文件”中手动点选，或因局域网 FTPS/MQTT、文件 MD5、耗材/安全确认而忽略启动命令；下次应先用短小校验件做端到端启动验证。
+
+### 发送链路复盘与修复
+
+- [x] 确认旧启动消息缺少文件 URL、sequence_id 层级错误，且连接后立即断开；原 `ok=true` 仅表示连接成功，不能证明设备接受打印。
+- [x] 增加文件 URL、等待匹配 sequence_id 的设备回执；明确区分 accepted 与 started，确认超时标记 unknown，避免诱导重复启动。
+- [x] 直接打印前检查 3MF 内含 `Metadata/plate_1.gcode`，拒绝模型版 3MF。
+- [x] 状态读取主动请求完整报告；以 gcode_state 为运行状态，不能将阶段编号或部分温度报告解释成空闲；剩余分钟转换为秒。
+- [x] API 支持 AMS 槽位映射。设备实际为 0.4mm 喷嘴；AMS 四槽均为 PLA Basic，黄色槽位索引 3，外置料盘为空。旧发送默认关闭 AMS，不适合当前设备。
+- [x] 相关回归测试 8 项通过。
+- [ ] 现场确认打印板类型与板面清空后，按实际板型重新切片；上一轮切片为 Cool Plate 35°C、无支撑，不能作为已验证生产配置。
+- [ ] 观察设备接受命令、进入准备/运行、首层完成；实物打印完成后才关闭验收。
+
+协议参考：[OpenBambuAPI project_file](https://github.com/PhilosophersStone/openbambuapi/blob/main/mqtt.md)。
