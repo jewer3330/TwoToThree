@@ -2362,6 +2362,9 @@ main {
 .wf-part-colors{display:flex;flex-wrap:wrap;gap:5px}
 .wf-part-colors button{width:22px;height:22px;border-radius:6px;border:2px solid transparent;cursor:pointer}
 .wf-part-colors button.sel{border-color:#fff;box-shadow:0 0 6px #fff8}
+.wf-part-curcolor{font-weight:600;color:var(--muted,#7d8590)}
+.wf-color-help{background:#0e1a24;border:1px dashed #1e88e5;border-radius:8px;padding:10px 12px;font-size:12px;line-height:1.6;color:#c8d3dd;margin-bottom:14px}
+.wf-color-help b{color:#1e88e5}
 .wf-footer{margin-top:20px;display:flex;justify-content:flex-end}
 .wf-actions{display:flex;gap:8px}
 

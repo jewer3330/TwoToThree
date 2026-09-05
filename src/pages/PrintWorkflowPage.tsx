@@ -64,14 +64,17 @@ export default function PrintWorkflowPage(){
             </div>
             {job.split?.status==='failed'&&<div className="wf-error">{job.split.error}</div>}
             {job.split?.status==='done'&&<>
+              <div className="wf-color-help">③ 上色：点击每个部件下的<b>色块</b>为它指定 AMS 颜色（一个部件一个色；多个部件可各选不同色实现<b>多色打印</b>）。选好后点右下「完成上色（保存）」。</div>
               <div className="wf-parts">
                 {job.split.parts.map(p=>{
                   const stlName=p.stl.split('/').pop()!;
                   const color=job.color.assignments[stlName]||'#9E9E9E';
+                  const colorName=PALETTE.find(([n,h])=>h===color)?.[0]||'灰';
                   return <div key={p.index} className="wf-part" style={{borderColor:color}}>
                     <img src={p.preview} alt={p.name} loading="lazy"/>
                     <b>{p.name||`部件 ${p.index}`}</b>
                     <span>{p.dims.map(d=>d.toFixed(1)).join('×')}mm</span>
+                    <span className="wf-part-curcolor">当前颜色：{colorName}</span>
                     <div className="wf-part-colors">{PALETTE.map(([n,h])=><button key={h} title={n} style={{background:h}} className={color===h?'sel':''} onClick={()=>pickColor(stlName,h)}/>)}</div>
                   </div>;
                 })}
