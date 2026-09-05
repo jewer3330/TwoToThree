@@ -1,17 +1,17 @@
-# Selfreg GPU Agent 无窗口后台启动模板（Windows）
+﻿# Selfreg GPU Agent: windowless background service launcher (Windows)
 #
-# 用法（管理员 / 任意用户，需 pythonw 与仓库已就位）：
-#   powershell -ExecutionPolicy Bypass -File deploy\gpu-node\agent_service.ps1 `
-#       -Env prod -ControlUrl http://8.153.36.240:8000 `
-#       -AgentId gpu-4060-prod -AgentName RTX4060 -Token <WORKER_TOKEN> `
+# Usage (powershell):
+#   powershell -ExecutionPolicy Bypass -File agent_service.ps1 `
+#       -EnvName prod -ControlUrl http://8.153.36.240:8000 `
+#       -AgentId gpu-4060-prod -AgentName RTX4060 -Token <TOKEN> `
 #       -ExternalRoot D:\print3d
 #
-# 特性：
-#   - 用 pythonw.exe 启动 agent 主进程 → 无控制台窗口（不闪框）
-#   - agent 内部所有子进程(nvidia-smi/blender/runner)均带 CREATE_NO_WINDOW
-#     （见 server/agent.py `_no_window`）→ 执行任务时也不弹黑框
-#   - stdout/stderr 重定向到 <ExternalRoot>\agent-<Env>.{out,err}.log（日志落盘）
-#   - 幂等：先终止同名 agent 再启动（可被 schtasks 每分钟托管做自愈）
+# Features:
+#   - Launches agent main process with pythonw.exe -> no console window
+#   - All child processes (nvidia-smi/blender/runner) run with
+#     CREATE_NO_WINDOW (server/agent.py `_no_window`) -> no flashing boxes
+#   - stdout/stderr redirected to <ExternalRoot>\agent-<EnvName>.{out,err}.log
+#   - Idempotent: kills same-env agent first; safe under schtasks self-heal
 param(
     [Parameter(Mandatory=$true)][string]$EnvName,
     [Parameter(Mandatory=$true)][string]$ControlUrl,
@@ -36,15 +36,15 @@ if (-not $PythonBase) {
     }
 }
 if (-not $PythonBase -or -not (Test-Path $PythonBase)) {
-    Write-Output "python 目录未找到: $PythonBase"
+    Write-Output "python dir not found: $PythonBase"
     exit 2
 }
 $pyw = Join-Path $PythonBase 'pythonw.exe'
 if (-not (Test-Path $pyw)) {
-    Write-Output "pythonw.exe 不存在（需完整安装版 Python）: $pyw"
+    Write-Output "pythonw.exe missing (need full Python install): $pyw"
     exit 2
 }
-# 幂等：杀掉同名 agent（防多实例互踢/占卡）
+# Idempotent: stop same-env agent first
 Get-CimInstance Win32_Process -Filter "Name='python.exe'" |
     Where-Object { $_.CommandLine -match ('server\.agent ' + [regex]::Escape($EnvName)) } |
     ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
@@ -63,9 +63,9 @@ $p = Start-Process -FilePath $pyw -ArgumentList '-u','-m','server.agent',$EnvNam
     -RedirectStandardOutput $outLog -RedirectStandardError $errLog -PassThru
 Start-Sleep -Seconds 6
 if ($p.HasExited) {
-    Write-Output "agent 启动失败 exit=" + $p.ExitCode
+    Write-Output ("agent start failed exit=" + $p.ExitCode)
     Get-Content $outLog -Tail 5 -ErrorAction SilentlyContinue
     Get-Content $errLog -Tail 5 -ErrorAction SilentlyContinue
     exit 1
 }
-Write-Output "agent($EnvName) 后台运行中 pid=$($p.Id) pythonw=$pyw"
+Write-Output "agent($EnvName) running in background pid=$($p.Id) pythonw=$pyw"
