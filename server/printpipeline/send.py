@@ -36,12 +36,13 @@ def mqtt_send_print(serial:str,ip:str,access_code:str,subtask_name:str,file_md5:
     import paho.mqtt.client as mqtt, threading
     if Path(remote_name).name != remote_name or not remote_name.endswith('.3mf'):
         return {'ok':False,'error':'无效的打印文件名'}
-    sequence=str(int(time.time()*1000))
+    sequence=str(20000 + time.time_ns()%10000)
     done=threading.Event()
     ctx=ssl.SSLContext(ssl.PROTOCOL_TLSv1_2);ctx.check_hostname=False;ctx.verify_mode=ssl.CERT_NONE
     c=mqtt.Client(mqtt.CallbackAPIVersion.VERSION2,client_id=f'bbl-print-{int(time.time())}')
     c.tls_set_context(ctx);c.username_pw_set('bblp',access_code)
     ok={'ok':False}
+    replies=[]
     def on_connect(client,userdata,flags,rc,props=None):
         code=int(rc.value) if hasattr(rc,'value') else int(rc)
         if code==0:
@@ -67,6 +68,8 @@ def mqtt_send_print(serial:str,ip:str,access_code:str,subtask_name:str,file_md5:
             report=json.loads(msg.payload).get('print',{})
         except (ValueError,TypeError):
             return
+        if report.get('command')=='project_file':
+            replies.append({k:report[k] for k in ('sequence_id','result','reason','err_code') if k in report})
         if str(report.get('sequence_id')) != sequence:
             return
         result=str(report.get('result','')).lower()
@@ -80,7 +83,7 @@ def mqtt_send_print(serial:str,ip:str,access_code:str,subtask_name:str,file_md5:
     try:
         c.connect(ip,8883,keepalive=30);c.loop_start()
         if not done.wait(20):
-            ok.update(error='未收到打印机确认，请查询设备状态，勿重复启动',unknown=True,sequenceId=sequence)
+            ok.update(error='未收到打印机确认，请查询设备状态，勿重复启动',unknown=True,sequenceId=sequence,replies=replies)
     except Exception as exc:
         ok['error']=str(exc)[:150]
     finally:

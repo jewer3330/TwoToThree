@@ -330,6 +330,7 @@ export const api = {
   printJobDelete: (id: string) => fetch(`/api/print/jobs/${id}`, { method: "DELETE" }),
   printJobExport3mf: (id: string) => fetch(`/api/print/jobs/${id}/export3mf`, { method: "POST" }).then(json<Record<string, unknown>>),
   printJobSend: (id: string, body: unknown) => fetch(`/api/print/jobs/${id}/send`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }).then(json<Record<string, unknown>>),
+  printJobUploadSliced: (id: string, file: File) => { const f=new FormData();f.append('file',file);return fetch(`/api/print/jobs/${id}/sliced`,{method:'POST',body:f}).then(json<Record<string, unknown>>); },
   printerPrint: (id: string, body: unknown) => fetch(`/api/print/printers/${id}/print`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }).then(json<Record<string, unknown>>),
 };
 

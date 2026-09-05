@@ -8,6 +8,11 @@ from . import jobs as jobs_mod
 from . import pipeline as pipe
 from . import send as send_mod
 from ..printer import registry as printer_registry
+import threading
+import zipfile
+import uuid
+
+_send_lock=threading.Lock()
 
 router=APIRouter(prefix='/api/print',tags=['print'])
 
@@ -60,8 +65,41 @@ async def upload_model(job_id:str,file:UploadFile=File(...)):
     final=d/f'model{ext}';tmp.replace(final)
     rel=f'print_jobs/{job_id}/model{ext}'
     j['modelFile']=rel;j['modelHash']=sha256(final);j['status']='model_ready';j['step']='split'
+    j['split']={'status':'pending','parts':[]}
+    j['color']={'status':'pending','palette':[],'assignments':{},'preview3mf':None}
+    j.pop('sliced',None)
     jobs_mod.save_job(j)
-    return {'modelUrl':f'/data/{rel}','hash':j['modelHash'],'size':size}
+    return {**j,'modelUrl':f'/data/{rel}','hash':j['modelHash'],'size':size}
+
+@router.post('/jobs/{job_id}/sliced',status_code=201)
+async def upload_sliced(job_id:str,file:UploadFile=File(...)):
+    j=jobs_mod.get_job(job_id)
+    if not j:raise HTTPException(404,'打印任务不存在')
+    target=jobs_mod.job_dir(job_id)/f'sliced-{uuid.uuid4().hex[:12]}.gcode.3mf'
+    size=0
+    try:
+        with target.open('wb') as out:
+            while chunk:=await file.read(1024*1024):
+                size+=len(chunk)
+                if size>100*1024*1024:raise HTTPException(413,'切片文件超过 100 MB')
+                out.write(chunk)
+        with zipfile.ZipFile(target) as archive:
+            info=archive.getinfo('Metadata/plate_1.gcode')
+            if info.file_size<100 or info.file_size>256*1024*1024:
+                raise ValueError('切片 G-code 大小异常')
+            with archive.open(info) as stream:
+                header=stream.read(8192).decode('utf-8',errors='replace')
+            if 'HEADER_BLOCK_START' not in header:raise ValueError('未识别切片头部')
+        from ..core import sha256
+        j['sliced']={'file':f'print_jobs/{job_id}/{target.name}','hash':sha256(target),'size':size}
+        j['step']='send';jobs_mod.save_job(j)
+        return j
+    except (zipfile.BadZipFile,KeyError,ValueError) as exc:
+        target.unlink(missing_ok=True)
+        raise HTTPException(422,f'请上传包含 plate_1.gcode 的切片版 3MF: {exc}')
+    except Exception:
+        target.unlink(missing_ok=True)
+        raise
 
 @router.post('/jobs/{job_id}/split')
 def split_job(job_id:str,body:SplitInput|None=None):
@@ -93,6 +131,7 @@ def split_job(job_id:str,body:SplitInput|None=None):
         ('绿','#43A047'),('蓝','#1E88E5'),('紫','#8E24AA'),('粉','#EC407A'),('青','#00ACC1'),
         ('棕','#6D4C41'),('灰','#9E9E9E')])]
     j['step']='color';jobs_mod.save_job(j)
+    j['color']['preview3mf']=None;j.pop('sliced',None);jobs_mod.save_job(j)
     return j
 
 @router.post('/jobs/{job_id}/color')
@@ -101,6 +140,7 @@ def color_job(job_id:str,body:ColorInput):
     if not j:raise HTTPException(404,'打印任务不存在')
     if j.get('split',{}).get('status')!='done':raise HTTPException(409,'请先完成分模块')
     pipe.assign_colors(j,body.assignments)
+    j['color']['preview3mf']=None;j.pop('sliced',None)
     j['step']='ready'
     # 为预览生成多色 GLB（Blender 给部件上色，简版：仅存分配表；3MF 生成后续）
     jobs_mod.save_job(j)
@@ -149,19 +189,31 @@ def export_3mf(job_id:str,body:dict|None=None):
     from ..core import sha256
     j['color']['preview3mf']=f'print_jobs/{job_id}/multicolor.3mf'
     j['color']['preview3mfHash']=sha256(out)
+    j.pop('sliced',None)
     j['step']='send';jobs_mod.save_job(j)
     return {'ok':True,'url':f'/data/{j["color"]["preview3mf"]}','size':out.stat().st_size}
 
 @router.post('/jobs/{job_id}/send')
 def send_to_printer(job_id:str,body:SendInput):
+    if not _send_lock.acquire(blocking=False):raise HTTPException(409,'已有发送操作正在进行')
+    try:return _send_to_printer(job_id,body)
+    finally:_send_lock.release()
+
+def _send_to_printer(job_id:str,body:SendInput):
     j=jobs_mod.get_job(job_id)
     if not j:raise HTTPException(404,'打印任务不存在')
-    if not j.get('color',{}).get('preview3mf'):raise HTTPException(409,'请先导出 3MF')
+    if not j.get('sliced') and not j.get('color',{}).get('preview3mf'):raise HTTPException(409,'请先导出 3MF 或导入切片文件')
     printer=printer_registry.get_printer(body.printerId)
     if not printer:raise HTTPException(404,'打印机不存在')
-    local=jobs_mod.job_abs_path(j,'color.preview3mf') or (jobs_mod.job_dir(job_id)/'multicolor.3mf')
+    local=jobs_mod.job_abs_path(j,'sliced.file') or jobs_mod.job_abs_path(j,'color.preview3mf') or (jobs_mod.job_dir(job_id)/'multicolor.3mf')
     if body.startPrint:
-        import zipfile
+        from ..printer.bambu import BambuClient,parse_print
+        from ..core import sha256
+        if j.get('lastSend',{}).get('hash')==sha256(local) and j['lastSend'].get('state') in ('dispatching','accepted','unknown'):
+            raise HTTPException(409,'此切片已有启动记录，请核实设备状态，避免重复打印')
+        probe=BambuClient(printer['ip'],printer['accessCode'],printer.get('serial')).fetch()
+        if not probe.get('ok') or parse_print(probe.get('data',{}))['state'] not in ('idle','finish','failed'):
+            raise HTTPException(409,'打印机未确认空闲，暂不能启动')
         if not printer.get('serial'):raise HTTPException(409,'打印机缺少序列号')
         try:
             with zipfile.ZipFile(local) as archive:
@@ -177,11 +229,14 @@ def send_to_printer(job_id:str,body:SendInput):
     result={'ok':True,'uploaded':remote_name,'size':local.stat().st_size}
     # 2) 可选 MQTT 启动
     if body.startPrint and printer.get('serial'):
+        j['lastSend']={'hash':sha256(local),'state':'dispatching','printerId':body.printerId};jobs_mod.save_job(j)
         md5=send_mod.file_md5(local)
         res=send_mod.mqtt_send_print(printer['serial'],printer['ip'],printer['accessCode'],
                                      j['name'],md5,remote_name=remote_name,ams_mapping=body.amsMapping)
         result['printCommand']=res
         result['ok']=res.get('ok',False)
+        j['lastSend']['state']='accepted' if res.get('ok') else ('unknown' if res.get('unknown') else 'rejected')
+        j['lastSend']['result']=res;jobs_mod.save_job(j)
     return result
 
 @router.post('/printers/{printer_id}/print')

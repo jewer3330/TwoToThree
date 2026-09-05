@@ -21,6 +21,8 @@ export default function PrintWorkflowPage(){
   const [selPrinter,setSelPrinter]=useState('');
   const [startPrint,setStartPrint]=useState(false);
   const [sendResult,setSendResult]=useState('');
+  const [amsSlot,setAmsSlot]=useState('3');
+  const uploadSliced=async(f:File)=>{if(!job)return;setBusy(true);try{const j=await api.printJobUploadSliced(job.id,f);setJob(j as unknown as PrintJob);setSendResult('切片文件已校验并导入');}catch(e){alert(String(e));}finally{setBusy(false);}};
 
   const refresh=useCallback(async()=>{try{const [j,p]=await Promise.all([api.printJobs(),api.printers()]);setJobs(j as unknown as PrintJob[]);setPrinters(p);}catch(e){console.error(e);}},[ ]);
   useEffect(()=>{refresh();},[refresh]);
@@ -32,7 +34,7 @@ export default function PrintWorkflowPage(){
   const doSplit=async()=>{if(!job)return;setBusy(true);try{const j=await api.printJobSplit(job.id,{maxParts,targetHeightMm});setJob(j as unknown as PrintJob);}catch(e){alert(String(e));}finally{setBusy(false);}};
   const doColor=async()=>{if(!job)return;setBusy(true);try{const j=await api.printJobColor(job.id,job.color.assignments);setJob(j as unknown as PrintJob);}catch(e){alert(String(e));}finally{setBusy(false);}};
   const doExport=async()=>{if(!job)return;setBusy(true);setSendResult('');try{const j=await api.printJobExport3mf(job.id);setJob({...job,color:{...job.color,preview3mf:(j as any).url,preview3mfHash:(j as any).hash},step:'send'} as PrintJob);setSendResult(`3MF 导出成功 (${((j as any).size/1048576).toFixed(1)} MB)`);}catch(e){alert(String(e));}finally{setBusy(false);}};
-  const doSend=async()=>{if(!job)return;setBusy(true);setSendResult('');try{const r=await api.printJobSend(job.id,{printerId:selPrinter,startPrint});const rj=r as any;setSendResult(`上传成功: ${rj.uploaded} (${(rj.size/1048576).toFixed(1)} MB)`+(rj.printCommand?`\n打印命令: ${JSON.stringify(rj.printCommand)}`:''));}catch(e){alert(`发送失败：${(e as Error).message}`);}finally{setBusy(false);}};
+  const doSend=async()=>{if(!job)return;setBusy(true);setSendResult('');try{const r=await api.printJobSend(job.id,{printerId:selPrinter,startPrint,amsMapping:amsSlot===''?[]:[Number(amsSlot)]});const rj=r as any;setSendResult(`文件已上传: ${rj.uploaded} (${(rj.size/1048576).toFixed(1)} MB)`+(rj.printCommand?`\n${rj.printCommand.accepted?'打印机已接受任务，实际进度请查看打印机状态':rj.printCommand.error||'未确认启动'}`:''));}catch(e){alert(`发送失败：${(e as Error).message}`);}finally{setBusy(false);}};
   const del=async(id:string)=>{if(!confirm('删除该打印任务？'))return;setBusy(true);try{await api.printJobDelete(id);if(job?.id===id)setJob(null);await refresh();}catch(e){alert(String(e));}finally{setBusy(false);}};
 
   const pickColor=(stlName:string,hex:string)=>{if(!job)return;const a={...job.color.assignments,[stlName]:hex};setJob({...job,color:{...job.color,assignments:a}});};
@@ -81,12 +83,13 @@ export default function PrintWorkflowPage(){
                   </div>;
                 })}
               </div>
-              <div className="wf-footer"><button className="button primary" onClick={doColor} disabled={busy}><ChevronRight size={16}/>完成上色（保存）</button></div>
+              <div className="wf-footer"><button className="button primary" onClick={doColor} disabled={busy}><ChevronRight size={16}/>完成上色（保存）</button><button className="button secondary" onClick={doExport} disabled={busy}>导出模型 3MF</button><label className="button secondary">导入切片版 3MF<input hidden type="file" accept=".3mf" disabled={busy} onChange={e=>{const f=e.target.files?.[0];if(f)uploadSliced(f);}}/></label></div>
             </>}
-            {job.color?.preview3mf&&<div className="wf-send">
+            {(job.color?.preview3mf||(job as any).sliced)&&<div className="wf-send">
               <h4>④ 发送打印</h4>
               <div className="wf-send-row">
-                <a className="button secondary" href={job.color.preview3mf} download>下载多色 3MF</a>
+                {job.color.preview3mf&&<a className="button secondary" href={job.color.preview3mf.startsWith('/')?job.color.preview3mf:`/data/${job.color.preview3mf}`} download>下载模型 3MF</a>}
+                <label>耗材槽<select value={amsSlot} onChange={e=>setAmsSlot(e.target.value)}><option value="">外置料盘</option>{[0,1,2,3].map(i=><option key={i} value={i}>AMS {i+1}</option>)}</select></label>
                 <select className="printer-select" value={selPrinter} onChange={e=>setSelPrinter(e.target.value)}>
                   <option value="">选择打印机…</option>
                   {printers.filter(p=>p.enabled).map(p=><option key={p.id} value={p.id}>{p.name} ({p.ip})</option>)}
