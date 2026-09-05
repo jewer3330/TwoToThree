@@ -59,6 +59,11 @@ def _pick_host(job:dict):
             if not h.get('enabled'):continue
             s=h.get('status',{})
             if not s.get('online'):continue
+            # 健康门禁：自检 broken（GPU/驱动/Python 不可用）或磁盘 <5GB 不派发
+            if s.get('health')=='broken':
+                continue
+            if (s.get('diskFree') is not None) and float(s.get('diskFree') or 0)<5:
+                continue
             caps=s.get('caps',{})
             if not caps.get(backend):continue
             if backend=='hunyuan3d' and multi and not caps.get('hunyuan3dMultiview'):continue

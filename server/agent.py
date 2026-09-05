@@ -17,7 +17,7 @@
   AGENT_MAX_JOBS    并发任务上限（默认 1）
 """
 from __future__ import annotations
-import asyncio, json, os, socket, subprocess, sys, time
+import asyncio, json, os, socket, subprocess, sys, threading, time
 from pathlib import Path
 
 try:
@@ -91,48 +91,157 @@ def _disk_free()->float|None:
         return None
 
 
-def _capabilities()->dict:
-    """本机能力检测（OS 感知，基于 studio_paths 布局）。
+# --------------------------------------------------------------------------- #
+# 环境自检（selfcheck）：能力必须经过「真实运行验证」，而不是看文件在不在。
+# 自注册节点上报的 caps 全部由自检结果推导——缺依赖/权重/可执行/磁盘不足时
+# 对应能力自动降为 False/降级，调度器不会再派发到跑不了的任务上
+# （假能力 = 派过去才 ModuleNotFoundError/超时，整单白跑）。
+# --------------------------------------------------------------------------- #
+_CHECK_TTL=300.0
+_check_lock=threading.Lock()
+_check_cache={'at':0.0,'result':None}
+MIN_FREE_GB=float(_env('AGENT_MIN_FREE_GB','15') or '15')
 
-    不能直接复用 backends.capabilities()：它在 local 模式硬编码 Windows 路径，
-    在 Linux 节点（AutoDL 等）会全部误报 False。这里按当前 OS 探测实际路径。
-    """
-    caps={}
+def _probe_exec(argv:list[str],timeout:int=25)->tuple[bool,str]:
+    """真实执行一条探测命令。返回 (ok, 摘要)。"""
     try:
-        from studio_paths import LOCAL_ROOT
-        win=os.name=='nt'
-        py=LOCAL_ROOT/'hunyuan-bootstrap'/('Scripts' if win else 'bin')/('python.exe' if win else 'python')
-        blender=LOCAL_ROOT/('Blender52' if win else 'blender')/('blender.exe' if win else 'blender')
-        model=LOCAL_ROOT/'Hunyuan3D-2.1-model'
-        mv_model=LOCAL_ROOT/'Hunyuan3D-2mv-model-v2'
-        repo=Path(__file__).resolve().parents[1]
-        runner=repo/'pipeline'/'run_hunyuan_yoyo.py'
-        mv_runner=repo/'pipeline'/'run_hunyuan_multiview.py'
-        renderer=repo/'pipeline'/'blender_render_job.py'
-        refiner=repo/'pipeline'/'blender_auto_refine.py'
-        stl=repo/'pipeline'/'blender_export_stl.py'
-        caps={
-            'hunyuan3d':py.exists() and runner.exists() and (model/'hunyuan3d-dit-v2-1'/'model.fp16.ckpt').exists() and (model/'hunyuan3d-dit-v2-1'/'config.yaml').exists(),
-            'hunyuan3dMultiview':py.exists() and mv_runner.exists() and (mv_model/'hunyuan3d-dit-v2-mv'/'model.fp16.safetensors').exists() and (mv_model/'hunyuan3d-dit-v2-mv'/'config.yaml').exists(),
-            'sf3d':False,
-            'triposr':False,
-            'blender':blender.exists() and renderer.exists(),
-            'blenderRefinement':blender.exists() and refiner.exists(),
-            'blenderStlExport':blender.exists() and stl.exists(),
-        }
-    except Exception:
-        caps={k:False for k in ('hunyuan3d','hunyuan3dMultiview','sf3d','triposr','blender','blenderRefinement','blenderStlExport')}
+        r=subprocess.run(argv,capture_output=True,text=True,timeout=timeout)
+        out=((r.stdout or '')+(r.stderr or '')).strip()
+        return r.returncode==0,(out[:200] or f'exit {r.returncode}')
+    except subprocess.TimeoutExpired:
+        return False,f'执行超时(>{timeout}s)'
+    except Exception as exc:
+        return False,str(exc)[:150]
+
+def _env_paths()->dict:
+    """当前 OS 下的关键路径清单（Windows/Linux 布局）。"""
+    from studio_paths import LOCAL_ROOT
+    win=os.name=='nt'
+    return {
+        'win':win,
+        'py':LOCAL_ROOT/'hunyuan-bootstrap'/('Scripts' if win else 'bin')/('python.exe' if win else 'python'),
+        'blender':LOCAL_ROOT/('Blender52' if win else 'blender')/('blender.exe' if win else 'blender'),
+        'model':LOCAL_ROOT/'Hunyuan3D-2.1-model',
+        'mv_model':LOCAL_ROOT/'Hunyuan3D-2mv-model-v2',
+        'u2net':Path.home()/'.u2net'/'u2net.onnx',
+        'repo':Path(__file__).resolve().parents[1],
+    }
+
+def _finalize_check(items:list,caps:dict,gpu,mem_total,mem_used,disk_free)->dict:
+    """汇总自检：health 分级 + caps 应用 AGENT_CAPS_OVERRIDE。"""
     if AGENT_CAPS_OVERRIDE:
         for name in AGENT_CAPS_OVERRIDE.split(','):
             name=name.strip()
-            if name:
-                caps[name]=True
-    return caps
+            if name:caps[name]=True
+    bad=[i for i in items if i['level']=='bad']
+    warn=[i for i in items if i['level']=='warn']
+    core_keys={'gpu','python','studio_paths'}
+    core_bad=any(i['key'] in core_keys for i in bad)
+    # broken：核心不可用（GPU/驱动/Python）→ 不可派发；degraded：部分能力缺失
+    health='ok' if not bad else ('broken' if core_bad else 'degraded')
+    ok=not bad
+    summary='；'.join(f"{i['label']} {i['detail']}" for i in bad[:4])
+    if not summary:
+        summary='全部自检通过' if not warn else '通过（有预警项）'
+    return {'ok':ok,'health':health,'caps':caps,'items':items,
+            'summary':summary[:300],'gpu':gpu,
+            'memTotal':mem_total,'memUsed':mem_used,
+            'diskFreeGB':disk_free,'checkedAt':time.time()}
+
+def _run_environment_check()->dict:
+    """执行一次真实自检（不缓存）：逐项跑命令验证。"""
+    items=[];gpu,mem_total,mem_used=_gpu_snapshot()
+    def add(key,label,level,detail):items.append({'key':key,'label':label,'level':level,'detail':detail})
+    try:
+        p=_env_paths()
+    except Exception as exc:
+        add('studio_paths','环境布局','bad',f'studio_paths 不可用: {exc}')
+        return _finalize_check(items,{k:False for k in CAP_KEYS},gpu,mem_total,mem_used,_disk_free() or 0.0)
+    # GPU 驱动（真跑 nvidia-smi）
+    ok,det=_probe_exec(['nvidia-smi','--query-gpu=name,memory.total','--format=csv,noheader'],timeout=8)
+    gpu_ok=ok and bool(gpu)
+    add('gpu','GPU 驱动 nvidia-smi', 'ok' if gpu_ok else 'bad', (gpu or '') if gpu_ok else det)
+    # 推理 Python
+    py_ok=p['py'].exists()
+    py_det='hunyuan-bootstrap python' if py_ok else f'bootstrap python 缺失: {p["py"]}'
+    add('python','推理 Python 环境','ok' if py_ok else 'bad',py_det)
+    # Hunyuan 依赖：真实 import hy3dgen + torch + CUDA
+    if py_ok:
+        code='import hy3dgen,hy3dgen.rembg,torch;print("CUDA",torch.cuda.is_available())'
+        ok,det=_probe_exec([str(p['py']),'-c',code],timeout=120)
+        hy_deps=ok and ('CUDA True' in det)
+        add('hunyuan.deps','Hunyuan 依赖 hy3dgen/torch/CUDA','ok' if hy_deps else 'bad',det)
+    else:
+        hy_deps=False
+        add('hunyuan.deps','Hunyuan 依赖 hy3dgen/torch/CUDA','bad','python 不可用')
+    w1=p['model']/'hunyuan3d-dit-v2-1'/'model.fp16.ckpt';w1c=p['model']/'hunyuan3d-dit-v2-1'/'config.yaml'
+    w_ok=w1.exists() and w1c.exists()
+    add('hunyuan.weights','Hunyuan3D-2.1 权重','ok' if w_ok else 'bad',
+        'ok' if w_ok else f'权重缺失: {p["model"].name}/hunyuan3d-dit-v2-1 (fp16.ckpt/config.yaml)')
+    u2_ok=p['u2net'].exists()
+    add('hunyuan.rembg','rembg u2net 模型','ok' if u2_ok else 'bad','ok' if u2_ok else f'缺失: {p["u2net"]}')
+    hy_script=(p['repo']/'pipeline'/'run_hunyuan_yoyo.py').exists()
+    add('hunyuan.script','单图 runner','ok' if hy_script else 'bad','ok' if hy_script else 'run_hunyuan_yoyo.py 缺失')
+    # 多视图权重/脚本
+    mw=p['mv_model']/'hunyuan3d-dit-v2-mv'/'model.fp16.safetensors';mwc=p['mv_model']/'hunyuan3d-dit-v2-mv'/'config.yaml'
+    mv_w=mw.exists() and mwc.exists()
+    add('hunyuan-mv.weights','Hunyuan3D-2mv 权重','ok' if mv_w else 'bad',
+        'ok' if mv_w else f'权重缺失: {p["mv_model"].name}/hunyuan3d-dit-v2-mv')
+    mv_script=(p['repo']/'pipeline'/'run_hunyuan_multiview.py').exists()
+    add('hunyuan-mv.script','多视图 runner','ok' if mv_script else 'bad','ok' if mv_script else 'run_hunyuan_multiview.py 缺失')
+    # Blender：真实执行 --version
+    b_ok=False;b_det=''
+    if p['blender'].exists():
+        b_ok,b_det=_probe_exec([str(p['blender']),'--version'],timeout=30)
+        b_det=(b_det.splitlines() or [''])[0][:120] if b_ok else b_det
+    else:
+        b_det=f'blender 可执行缺失: {p["blender"]}'
+    add('blender.exec','Blender 可执行 --version','ok' if b_ok else 'bad',b_det or 'ok')
+    renderer=(p['repo']/'pipeline'/'blender_render_job.py').exists()
+    refiner=(p['repo']/'pipeline'/'blender_auto_refine.py').exists()
+    stl=(p['repo']/'pipeline'/'blender_export_stl.py').exists()
+    split=(p['repo']/'pipeline'/'blender_split_connected.py').exists()
+    all_scripts=renderer and refiner and stl and split
+    add('blender.scripts','Blender pipeline 脚本','ok' if all_scripts else 'bad',
+        '渲染/精修/STL/分件脚本齐备' if all_scripts else '部分脚本缺失(渲染/精修/STL/分件)')
+    # 磁盘
+    disk_free=_disk_free() or 0.0
+    disk_level='ok' if disk_free>=MIN_FREE_GB else ('warn' if disk_free>=5 else 'bad')
+    add('disk','磁盘剩余','ok' if disk_level=='ok' else disk_level,
+        f'{disk_free:.1f} GB 可用（阈值 {MIN_FREE_GB:.0f} GB）')
+    caps={
+        'hunyuan3d':py_ok and hy_deps and w_ok and u2_ok and hy_script,
+        'hunyuan3dMultiview':py_ok and hy_deps and mv_w and mv_script,
+        'sf3d':False,'triposr':False,
+        'blender':b_ok and renderer,
+        'blenderRefinement':b_ok and refiner,
+        'blenderStlExport':b_ok and stl,
+    }
+    return _finalize_check(items,caps,gpu,mem_total,mem_used,disk_free)
+
+CAP_KEYS=('hunyuan3d','hunyuan3dMultiview','sf3d','triposr','blender','blenderRefinement','blenderStlExport')
+
+def environment_check()->dict:
+    """完整环境自检（带 TTL 缓存；probe/hello 高频时命中缓存不重复跑命令）。
+
+    返回：{ok, health(ok|degraded|broken), caps, items[], summary, gpu, diskFreeGB, checkedAt}
+    """
+    global _check_cache
+    now=time.monotonic()
+    with _check_lock:
+        if _check_cache['result'] and now-_check_cache['at']<_CHECK_TTL:
+            return _check_cache['result']
+        result=_run_environment_check()
+        _check_cache={'at':now,'result':result}
+        return result
+
+def _capabilities()->dict:
+    """兼容壳：能力由环境自检推导（不再拍脑袋）。"""
+    return environment_check()['caps']
 
 
 def hello_message()->dict:
-    gpu,mem_total,mem_used=_gpu_snapshot()
-    caps=_capabilities()
+    check=environment_check()
     repo_root=str(Path(__file__).resolve().parents[1])
     try:
         from studio_paths import EXTERNAL_ROOT
@@ -144,9 +253,11 @@ def hello_message()->dict:
         'token':WORKER_TOKEN,
         'node':{
             'id':AGENT_ID,'name':AGENT_NAME,
-            'caps':caps,
-            'gpu':gpu,'memTotal':mem_total,'memUsed':mem_used,
-            'diskFree':_disk_free(),
+            'caps':check['caps'],
+            'health':check['health'],
+            'check':{k:check[k] for k in ('ok','health','items','summary','checkedAt')},
+            'gpu':check['gpu'],'memTotal':check['memTotal'],'memUsed':check['memUsed'],
+            'diskFree':check['diskFreeGB'],
             'maxConcurrentJobs':AGENT_MAX_JOBS,
             'labels':[],
             'os':'linux' if os.name!='nt' else 'windows',
@@ -158,10 +269,12 @@ def hello_message()->dict:
 
 
 def probe_result(probe_id:str)->dict:
-    gpu,mem_total,mem_used=_gpu_snapshot()
+    check=environment_check()
     return {'type':'probe_result','probeId':probe_id,
-            'caps':_capabilities(),'gpu':gpu,
-            'memTotal':mem_total,'memUsed':mem_used,'diskFree':_disk_free()}
+            'caps':check['caps'],'health':check['health'],
+            'check':{k:check[k] for k in ('ok','health','items','summary','checkedAt')},
+            'gpu':check['gpu'],'memTotal':check['memTotal'],'memUsed':check['memUsed'],
+            'diskFree':check['diskFreeGB']}
 
 
 def _run_job(job_id:str,config:dict)->dict:

@@ -57,6 +57,8 @@ def _register(node:dict):
             'online':True,'route':'selfreg',
             'gpu':node.get('gpu'),'memTotal':node.get('memTotal'),'memUsed':node.get('memUsed'),
             'diskFree':node.get('diskFree'),'caps':caps,
+            'health':node.get('health') or ('degraded' if not caps else 'ok'),
+            'check':node.get('check') or {},
             'latencyMs':None,'lastError':None,'lastProbeAt':None,
         })
 
@@ -357,6 +359,8 @@ async def ws_endpoint(ws:WebSocket):
                 status={'online':True,'route':'selfreg','gpu':msg.get('gpu'),
                         'memTotal':msg.get('memTotal'),'memUsed':msg.get('memUsed'),
                         'diskFree':msg.get('diskFree'),'caps':msg.get('caps') or {},
+                        'health':msg.get('health') or ('degraded' if not (msg.get('caps') or {}) else 'ok'),
+                        'check':msg.get('check') or {},
                         'latencyMs':None,'lastError':None,'lastProbeAt':time.time()}
                 with _lock:
                     hosts.set_state(node_id,**status)

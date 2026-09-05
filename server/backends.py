@@ -514,11 +514,13 @@ _CAP_MAP=[('hunyuan3d',0),('hunyuan3d',1),('hunyuan3d',2),('sf3d',3),('sf3d',4),
           ('triposr',5),('triposr',6),('blender',7),('blender',8),
           ('blenderRefinement',7),('blenderRefinement',9),('blenderStlExport',7),('blenderStlExport',10)]
 
-def probe_host(cfg:dict)->dict:
+def probe_host(cfg:dict,deep:bool=False)->dict:
     """探测一台主机的完整健康状态（GPU/显存/磁盘/能力）。供 GPU 控制面板轮询。
 
     provider='autodl' 的节点先查 AutoDL 实例生命周期状态：非 running（关机/开机中）
     直接返回 offline + autodlState，不浪费 SSH 探测；running 时继续 SSH 探测。
+    deep=True 时额外在节点跑一次真实环境自检（import hy3dgen/torch+blender
+    --version），把 health/check 写回（启用/手动探测时触发；周期轮询保持浅探）。
     """
     if cfg.get('provider')=='autodl':
         autodl=_probe_autodl_state(cfg)
@@ -575,7 +577,42 @@ def probe_host(cfg:dict)->dict:
             result['caps']=caps
     except Exception as exc:
         result['lastError']=str(exc)[:200]
+    # 深检：真实运行节点自检（依赖/权重/Blender/磁盘），得到真实 caps + health
+    if deep and result.get('online'):
+        sc=selfcheck_remote(r)
+        if sc:
+            result['gpu']=sc.get('gpu')
+            result['memTotal']=sc.get('memTotal')
+            result['memUsed']=sc.get('memUsed')
+            if sc.get('diskFreeGB') is not None:result['diskFree']=sc['diskFreeGB']
+            result['caps']=sc.get('caps') or result.get('caps') or {}
+            result['health']=sc.get('health')
+            result['check']=sc.get('check') or {k:sc.get(k) for k in ('ok','items','summary','checkedAt')}
+            result['lastSelfcheckAt']=sc.get('checkedAt')
     return result
+
+def selfcheck_remote(r)->dict|None:
+    """SSH 远程执行节点真实环境自检（复用 server.agent.environment_check）。
+
+    在节点仓库根 cwd 用 bootstrap python 跑：真实 import hy3dgen/rembg/torch 并
+    探测 CUDA、真实执行 blender --version、校验权重/磁盘。输出
+    SELFCHECK_JSON=<json> 供控制面解析。深检耗时较长（import torch），约 10-60s。
+    """
+    try:
+        rc=_rc(r)
+        repo=str(r.root or '')
+        code=("import sys,json;sys.path.insert(0,%r);"
+              "from server.agent import environment_check;"
+              "print('SELFCHECK_JSON='+json.dumps(environment_check()))") % repo
+        out=r.cmd([str(rc['python']),'-c',code],timeout=300)
+        if out.returncode!=0:
+            return None
+        line=next((l for l in out.stdout.splitlines() if l.startswith('SELFCHECK_JSON=')),None)
+        if not line:
+            return None
+        return json.loads(line[len('SELFCHECK_JSON='):])
+    except Exception:
+        return None
 
 def remote_gpu()->dict|None:
     if remote() is None:return None

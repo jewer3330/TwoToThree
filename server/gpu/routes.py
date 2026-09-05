@@ -40,7 +40,8 @@ def remove_host(host_id:str):
 def probe(host_id:str):
     h=hosts.get_host(host_id)
     if not h:raise HTTPException(404,'主机不存在')
-    status=probe_host(h)
+    # 手动探测=深检：真实运行节点自检，刷新 health/真实 caps
+    status=probe_host(h,deep=True)
     hosts.set_state(host_id,**status)
     return status
 

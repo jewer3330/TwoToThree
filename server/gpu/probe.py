@@ -9,12 +9,12 @@ from ..backends import probe_host
 from . import hosts
 
 class _ProbeWorker(threading.Thread):
-    def __init__(self,h:dict):
+    def __init__(self,h:dict,deep:bool=False):
         super().__init__(daemon=True,name=f'gpu-probe-{h["id"][-6:]}')
-        self.h=h
+        self.h=h;self.deep=deep
     def run(self):
         try:
-            status=probe_host(self.h)
+            status=probe_host(self.h,deep=self.deep)
         except Exception as exc:
             status={'online':False,'lastError':str(exc)[:200]}
         status['_tick']=int(time.monotonic())
@@ -36,6 +36,7 @@ class ProbeThread(threading.Thread):
             except Exception:pass
     def _tick(self):
         now=int(time.monotonic())
+        pending_ids=hosts.pending_probes()   # 一次性取走全部待深检主机
         hosts_list=hosts.list_hosts()
         for h in hosts_list:
             if not h.get('enabled'):continue
@@ -43,5 +44,7 @@ class ProbeThread(threading.Thread):
             # 探测会把 online/caps 覆盖成 offline/空，破坏调度器的能力匹配。
             if h.get('provider')=='selfreg':continue
             s=h.get('status',{})
-            if h['id'] in hosts.pending_probes() or not s.get('lastProbeAt') or (now-int(s.get('_tick',0)))>=self.interval:
-                _ProbeWorker(h).start()
+            pending=h['id'] in pending_ids
+            # pending（启用/新注册）→ 深检一次拿真实 health/caps；周期轮询浅探
+            if pending or not s.get('lastProbeAt') or (now-int(s.get('_tick',0)))>=self.interval:
+                _ProbeWorker(h,deep=pending).start()
