@@ -22,9 +22,10 @@ from pathlib import Path
 
 try:
     import websockets
-except ImportError:
-    sys.stderr.write('缺少 websockets 依赖：pip install websockets\n')
-    raise
+except ImportError:  # pragma: no cover - 环境相关
+    # 不在此处失败：environment_check 自检常被控制面/运维用非 bootstrap python
+    # 远程调用（SSH 深检），不应依赖 websockets。真正连接前（main/session）再检查。
+    websockets = None
 
 
 def _env(name:str,default:str='')->str:
@@ -488,6 +489,8 @@ class Agent:
             await self._send({'type':'ping'})
 
     async def session(self):
+        if websockets is None:
+            raise RuntimeError('缺少 websockets 依赖：pip install websockets（agent 常驻连接必需）')
         url=_ws_url()
         print(f'[agent] 连接控制面 {url}（node={AGENT_ID}）')
         async with websockets.connect(url,max_size=10*1024*1024,ping_interval=None) as ws:

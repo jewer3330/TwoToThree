@@ -45,6 +45,7 @@ class ProbeThread(threading.Thread):
             if h.get('provider')=='selfreg':continue
             s=h.get('status',{})
             pending=h['id'] in pending_ids
-            # pending（启用/新注册）→ 深检一次拿真实 health/caps；周期轮询浅探
-            if pending or not s.get('lastProbeAt') or (now-int(s.get('_tick',0)))>=self.interval:
-                _ProbeWorker(h,deep=pending).start()
+            first=not s.get('lastProbeAt')
+            # 首次/pending（启用或新注册）→ 深检拿真实 health/caps；周期轮询浅探
+            if pending or first or (now-int(s.get('_tick',0)))>=self.interval:
+                _ProbeWorker(h,deep=pending or first).start()

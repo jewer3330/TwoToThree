@@ -601,9 +601,10 @@ def selfcheck_remote(r)->dict|None:
     try:
         rc=_rc(r)
         repo=str(r.root or '')
-        code=("import sys,json;sys.path.insert(0,%r);"
+        code=("import sys,json,os;os.environ.setdefault('STUDIO_EXTERNAL_ROOT',%r);"
+              "sys.path.insert(0,%r);"
               "from server.agent import environment_check;"
-              "print('SELFCHECK_JSON='+json.dumps(environment_check()))") % repo
+              "print('SELFCHECK_JSON='+json.dumps(environment_check()))") % (str(r.ext or ''),repo)
         out=r.cmd([str(rc['python']),'-c',code],timeout=300)
         if out.returncode!=0:
             return None
