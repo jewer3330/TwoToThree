@@ -59,3 +59,13 @@
 - [x] `gpu-3060-dev` 真实 Blender 分件通过：`80.733 × 54.106 × 120.0 mm`，包围盒中心位于 XY 原点，最低点 `Z=0`。
 - [x] 真实 3MF 导出通过：1 个对象、171316 个去重顶点、尺寸 `80.733 × 54.106 × 120.0 mm`，文件大小 3716877 bytes。
 - [x] 公网开发服 `https://3d.lovesun.top/api/system/health` 返回 HTTP 200。
+
+### 实际切片与打印尝试（2026-09-05）
+
+- [x] 打印机检查：`A1 主打印机` 在线、空闲，使用 A1 0.4 mm 喷嘴配置。
+- [x] 使用 OrcaSlicer 2.4.2 真实切片：Bambu Lab A1 0.4 nozzle、0.20mm Standard、Bambu PLA Basic。
+- [x] 切片校验：生成 `plate_1.gcode` 和切片版 `sliced.3mf`；600 层，最大 Z=120.00 mm，预计打印约 7 小时 35 分。
+- [x] 保留原始模型版文件为 `multicolor.model-only.3mf`，切片版替换为任务发送文件 `multicolor.3mf`。
+- [x] FTP 上传接口返回 HTTP 200；随后 MQTT `project_file` 启动命令返回 `ok=true`。
+- [ ] 设备回读仍为 `idle`，未观察到 `running/progress` 状态，因此本次记为“已上传并发出启动命令，但设备未确认开始打印”，不宣称实物打印已启动。
+- 风险：设备端可能需要在屏幕“我的文件”中手动点选，或因局域网 FTPS/MQTT、文件 MD5、耗材/安全确认而忽略启动命令；下次应先用短小校验件做端到端启动验证。
