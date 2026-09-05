@@ -73,7 +73,8 @@ def _gpu_snapshot()->tuple[str|None,int|None,int|None]:
     try:
         out=subprocess.run(['nvidia-smi','--query-gpu=name,memory.total,memory.used',
                             '--format=csv,noheader,nounits'],
-                           capture_output=True,text=True,timeout=5).stdout.strip()
+                           capture_output=True,text=True,timeout=5,
+                           creationflags=_no_window()).stdout.strip()
         if not out:return None,None,None
         parts=[p.strip() for p in out.split(',')]
         if len(parts)>=3:
@@ -103,10 +104,22 @@ _check_lock=threading.Lock()
 _check_cache={'at':0.0,'result':None}
 MIN_FREE_GB=float(_env('AGENT_MIN_FREE_GB','15') or '15')
 
+def _no_window() -> int:
+    """Windows 下禁止子进程弹出控制台黑框；非 Windows 返回 0（无效果）。
+
+    agent 常驻后台（无控制台/pythonw 启动），它 spawn 的 console 子进程
+    （nvidia-smi/blender/bootstrap python/runner）默认会各自新建控制台窗口
+    ——GPU 任务执行时黑框闪来闪去即源于此。统一加 CREATE_NO_WINDOW。
+    """
+    if os.name == 'nt':
+        return getattr(subprocess, 'CREATE_NO_WINDOW', 0)
+    return 0
+
 def _probe_exec(argv:list[str],timeout:int=25)->tuple[bool,str]:
     """真实执行一条探测命令。返回 (ok, 摘要)。"""
     try:
-        r=subprocess.run(argv,capture_output=True,text=True,timeout=timeout)
+        r=subprocess.run(argv,capture_output=True,text=True,timeout=timeout,
+                         creationflags=_no_window())
         out=((r.stdout or '')+(r.stderr or '')).strip()
         return r.returncode==0,(out[:200] or f'exit {r.returncode}')
     except subprocess.TimeoutExpired:
@@ -321,7 +334,8 @@ def _run_command(argv:list[str], cwd:str|None, log_line, timeout:int):
     import subprocess
     import threading
     proc=subprocess.Popen(argv,cwd=cwd,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,
-                          text=True,encoding='utf-8',errors='replace',bufsize=1)
+                          text=True,encoding='utf-8',errors='replace',bufsize=1,
+                          creationflags=_no_window())
     def pump():
         assert proc.stdout
         for line in proc.stdout:
@@ -338,7 +352,7 @@ def _run_command(argv:list[str], cwd:str|None, log_line, timeout:int):
         try:
             if os.name == 'nt':
                 subprocess.run(['taskkill', '/PID', str(proc.pid), '/T', '/F'],
-                               capture_output=True, timeout=20)
+                               capture_output=True, timeout=20, creationflags=_no_window())
             else:
                 proc.terminate()
                 try:
