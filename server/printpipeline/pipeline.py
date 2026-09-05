@@ -13,9 +13,6 @@ from ..gpu import hosts as gpu_hosts
 SPLIT_SCRIPT='pipeline/blender_split_connected.py'
 EXPORT_SCRIPT='pipeline/blender_export_multicolor_3mf.py'
 
-def _remote_script(name:str):
-    from pathlib import Path as P
-    return P(f'/app/pipeline/{name}')
 
 def _online_hosts()->list[dict]:
     """启用且在线的 GPU 主机（按注册顺序）。"""
@@ -42,14 +39,16 @@ def run_on_hosts(fn, timeout_seconds:int=600, name:str='任务'):
 
 def _split_on_host(input_glb:Path, out_dir:Path, max_parts:int, timeout:int):
     from ..backends import remote
+    from ..core import ROOT
     r=remote()
     if not r:raise BackendError('主机绑定失败')
     rc=_rc();marker=_marker();stag=r.stage(marker)
-    r.prepare(marker,[input_glb])
-    r.cmd(['powershell','-NoProfile','-Command',f"New-Item -ItemType Directory -Force -Path {stag} | Out-Null"])
-    r.upload(_remote_script('blender_split_connected.py'),f'{stag}\\split_script.py')
-    rmodel=f'{stag}\\{input_glb.name}';rout=f'{stag}\\out'
-    command=[rc['blender'],'--background','--factory-startup','--python',f'{stag}\\split_script.py','--',
+    # 输入（模型 + 分件脚本）经 prepare 下发：SSH 直传远端 stag；selfreg 放
+    # pullbox 并在 run() 时由 agent fetch 到同路径 stag。统一走 r.join 的节点路径。
+    split_script=ROOT/'pipeline'/'blender_split_connected.py'
+    r.prepare(marker,[input_glb,split_script])
+    rmodel=r.join(stag,input_glb.name);rscript=r.join(stag,split_script.name);rout=r.join(stag,'out')
+    command=[rc['blender'],'--background','--factory-startup','--python',rscript,'--',
              '--input',rmodel,'--output-dir',rout,'--max-parts',str(max_parts)]
     r.run(command,lambda m:None,lambda:False,timeout=timeout,marker=stag)
     r.download_dir(rout,out_dir)
@@ -69,21 +68,21 @@ def split_model(input_glb:Path, out_dir:Path, max_parts:int=12, timeout_seconds:
 
 def _export_on_host(parts_dir:Path, colors:dict, output:Path, timeout:int):
     from ..backends import remote
+    from ..core import ROOT
     r=remote()
     if not r:raise BackendError('主机绑定失败')
     rc=_rc();marker=_marker();stag=r.stage(marker)
-    r.cmd(['powershell','-NoProfile','-Command',f"New-Item -ItemType Directory -Force -Path {stag} | Out-Null"])
-    r.cmd(['powershell','-NoProfile','-Command',f"New-Item -ItemType Directory -Force -Path {stag}\\parts | Out-Null"])
-    r.upload(_remote_script('blender_export_multicolor_3mf.py'),f'{stag}\\export_script.py')
-    for stl in sorted(parts_dir.glob('*.stl')):
-        r.upload(stl,f'{stag}\\parts\\{stl.name}')
-    rout=f'{stag}\\multicolor.3mf'
-    # colors 写入 JSON 文件传参（避免命令行 JSON 引号被 cmd 转义破坏）
+    export_script=ROOT/'pipeline'/'blender_export_multicolor_3mf.py'
     colors_local=output.parent/'colors.json'
     colors_local.write_text(json.dumps(colors),encoding='utf-8')
-    r.upload(colors_local,f'{stag}\\colors.json')
-    command=[rc['blender'],'--background','--factory-startup','--python',f'{stag}\\export_script.py','--',
-             '--parts-dir',f'{stag}\\parts','--colors-file',f'{stag}\\colors.json','--output',rout]
+    # parts STL 平铺下发到 stag（prepare→fetch）；导出脚本只 glob *.stl，
+    # 把 --parts-dir 指到 stag 根即可同时兼容 selfreg(平铺) 与 SSH。
+    stls=sorted(parts_dir.glob('*.stl'))
+    r.prepare(marker,[export_script,colors_local,*stls])
+    rscript=r.join(stag,export_script.name)
+    rout=r.join(stag,'multicolor.3mf')
+    command=[rc['blender'],'--background','--factory-startup','--python',rscript,'--',
+             '--parts-dir',stag,'--colors-file',r.join(stag,colors_local.name),'--output',rout]
     r.run(command,lambda m:None,lambda:False,timeout=timeout,marker=stag)
     output.parent.mkdir(parents=True,exist_ok=True)
     r.download_compressed(rout,output)
