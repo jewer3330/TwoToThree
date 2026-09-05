@@ -5,7 +5,7 @@ import type {Printer} from '../types';
 import {PageHeader} from '../App';
 
 interface PrintPart { index:number; name:string; stl:string; preview:string; dims:number[]; volume:number }
-interface PrintJob { id:string; name:string; status:string; step:string; modelUrl:string|null; modelFile?:string; split:{status:string;parts:PrintPart[];partCount?:number;error?:string;maxParts?:number}; color:{palette:Array<{id:string;name:string;hex:string}>;assignments:Record<string,string>;preview3mf?:string} }
+interface PrintJob { id:string; name:string; status:string; step:string; modelUrl:string|null; modelFile?:string; split:{status:string;parts:PrintPart[];partCount?:number;error?:string;maxParts?:number;targetHeightMm?:number}; color:{palette:Array<{id:string;name:string;hex:string}>;assignments:Record<string,string>;preview3mf?:string} }
 
 const PALETTE=[['白','#FFFFFF'],['黑','#1F1F1F'],['红','#E53935'],['橙','#FB8C00'],['黄','#FDD835'],['绿','#43A047'],['蓝','#1E88E5'],['紫','#8E24AA'],['粉','#EC407A'],['青','#00ACC1'],['棕','#6D4C41'],['灰','#9E9E9E']];
 
@@ -17,6 +17,7 @@ export default function PrintWorkflowPage(){
   const [name,setName]=useState('打印任务');
   const [drag,setDrag]=useState(false);
   const [maxParts,setMaxParts]=useState(12);
+  const [targetHeightMm,setTargetHeightMm]=useState(120);
   const [selPrinter,setSelPrinter]=useState('');
   const [startPrint,setStartPrint]=useState(false);
   const [sendResult,setSendResult]=useState('');
@@ -25,10 +26,10 @@ export default function PrintWorkflowPage(){
   useEffect(()=>{refresh();},[refresh]);
 
   const create=async()=>{setBusy(true);try{const j=await api.printJobCreate({name});setJob(j as unknown as PrintJob);await refresh();}catch(e){alert(String(e));}finally{setBusy(false);}};
-  const load=(j:PrintJob)=>{setJob(j);setMaxParts(j.split?.maxParts||12);};
+  const load=(j:PrintJob)=>{setJob(j);setMaxParts(j.split?.maxParts||12);setTargetHeightMm(j.split?.targetHeightMm||120);};
 
   const upload=async(f:File)=>{if(!job)return;setBusy(true);try{const j=await api.printJobUploadModel(job.id,f);setJob(j as unknown as PrintJob);}catch(e){alert(String(e));}finally{setBusy(false);}};
-  const doSplit=async()=>{if(!job)return;setBusy(true);try{const j=await api.printJobSplit(job.id,{maxParts});setJob(j as unknown as PrintJob);}catch(e){alert(String(e));}finally{setBusy(false);}};
+  const doSplit=async()=>{if(!job)return;setBusy(true);try{const j=await api.printJobSplit(job.id,{maxParts,targetHeightMm});setJob(j as unknown as PrintJob);}catch(e){alert(String(e));}finally{setBusy(false);}};
   const doColor=async()=>{if(!job)return;setBusy(true);try{const j=await api.printJobColor(job.id,job.color.assignments);setJob(j as unknown as PrintJob);}catch(e){alert(String(e));}finally{setBusy(false);}};
   const doExport=async()=>{if(!job)return;setBusy(true);setSendResult('');try{const j=await api.printJobExport3mf(job.id);setJob({...job,color:{...job.color,preview3mf:(j as any).url,preview3mfHash:(j as any).hash},step:'send'} as PrintJob);setSendResult(`3MF 导出成功 (${((j as any).size/1048576).toFixed(1)} MB)`);}catch(e){alert(String(e));}finally{setBusy(false);}};
   const doSend=async()=>{if(!job)return;setBusy(true);setSendResult('');try{const r=await api.printJobSend(job.id,{printerId:selPrinter,startPrint});const rj=r as any;setSendResult(`上传成功: ${rj.uploaded} (${(rj.size/1048576).toFixed(1)} MB)`+(rj.printCommand?`\n打印命令: ${JSON.stringify(rj.printCommand)}`:''));}catch(e){alert(`发送失败：${(e as Error).message}`);}finally{setBusy(false);}};
@@ -58,9 +59,10 @@ export default function PrintWorkflowPage(){
           </div>}
 
           {job.modelFile&&<>
-            <div className="wf-row"><input value={name} onChange={e=>setName(e.target.value)} style={{display:'none'}}/>
-              <div className="wf-model-info"><b>模型已上传</b><span>{job.modelUrl}</span></div>
-              <button className="button secondary" onClick={doSplit} disabled={busy}><RefreshCw size={14}/>执行分模块</button>
+              <div className="wf-row"><input value={name} onChange={e=>setName(e.target.value)} style={{display:'none'}}/>
+                <div className="wf-model-info"><b>模型已上传</b><span>{job.modelUrl}</span></div>
+                <label className="wf-height">成品高度 <input type="number" min="10" max="500" step="1" value={targetHeightMm} onChange={e=>setTargetHeightMm(Math.max(10,Math.min(500,Number(e.target.value)||120)))}/><span>mm</span></label>
+                <button className="button secondary" onClick={doSplit} disabled={busy}><RefreshCw size={14}/>执行分模块</button>
             </div>
             {job.split?.status==='failed'&&<div className="wf-error">{job.split.error}</div>}
             {job.split?.status==='done'&&<>

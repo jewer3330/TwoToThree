@@ -37,7 +37,7 @@ def run_on_hosts(fn, timeout_seconds:int=600, name:str='任务'):
             bind_host(None)
     raise BackendError(f'{name}在所有 GPU 主机上均失败（超时保底已切换）: ' + '; '.join(errors))
 
-def _split_on_host(input_glb:Path, out_dir:Path, max_parts:int, timeout:int):
+def _split_on_host(input_glb:Path, out_dir:Path, max_parts:int, target_height_mm:float, timeout:int):
     from ..backends import remote
     from ..core import ROOT
     r=remote()
@@ -49,7 +49,8 @@ def _split_on_host(input_glb:Path, out_dir:Path, max_parts:int, timeout:int):
     r.prepare(marker,[input_glb,split_script])
     rmodel=r.join(stag,input_glb.name);rscript=r.join(stag,split_script.name);rout=r.join(stag,'out')
     command=[rc['blender'],'--background','--factory-startup','--python',rscript,'--',
-             '--input',rmodel,'--output-dir',rout,'--max-parts',str(max_parts)]
+             '--input',rmodel,'--output-dir',rout,'--max-parts',str(max_parts),
+             '--target-height-mm',str(target_height_mm)]
     r.run(command,lambda m:None,lambda:False,timeout=timeout,marker=stag)
     r.download_dir(rout,out_dir)
     r.cleanup(marker)
@@ -57,9 +58,9 @@ def _split_on_host(input_glb:Path, out_dir:Path, max_parts:int, timeout:int):
     if not report.exists():raise BackendError('Blender 未生成拆分报告')
     return json.loads(report.read_text(encoding='utf-8'))
 
-def split_model(input_glb:Path, out_dir:Path, max_parts:int=12, timeout_seconds:int=600):
+def split_model(input_glb:Path, out_dir:Path, max_parts:int=12, target_height_mm:float=120, timeout_seconds:int=600):
     """带故障转移的拆分：GPU-1→GPU-2→GPU-3…，超时自动切换。返回 split-report 数据。"""
-    _,data=run_on_hosts(lambda:_split_on_host(input_glb,out_dir,max_parts,timeout_seconds),
+    _,data=run_on_hosts(lambda:_split_on_host(input_glb,out_dir,max_parts,target_height_mm,timeout_seconds),
                         timeout_seconds=timeout_seconds,name='分模块')
     parts_dir=out_dir/'parts'
     if (out_dir/'out'/'parts').exists():

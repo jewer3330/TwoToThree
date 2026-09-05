@@ -20,7 +20,7 @@ def create_job(source:str,source_type:str='upload',name:str='打印任务')->dic
         jid=_jid();stamp=now()
         job={'id':jid,'name':name,'source':source,'sourceType':source_type,'status':'created',
              'step':'model','modelFile':None,'modelHash':None,
-             'split':{'status':'pending','parts':[],'reportPath':None,'maxParts':12},
+             'split':{'status':'pending','parts':[],'reportPath':None,'maxParts':12,'targetHeightMm':120},
              'color':{'status':'pending','palette':[],'assignments':{},'preview3mf':None},
              'createdAt':stamp,'updatedAt':stamp}
         d=job_dir(jid);d.mkdir(parents=True,exist_ok=True)

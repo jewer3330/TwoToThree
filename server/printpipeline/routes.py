@@ -17,6 +17,7 @@ class CreateInput(BaseModel):
     name:str='打印任务'
 class SplitInput(BaseModel):
     maxParts:int=Field(default=12,ge=1,le=64)
+    targetHeightMm:float=Field(default=120,ge=10,le=500)
 class ColorInput(BaseModel):
     assignments:dict[str,str]
 class SendInput(BaseModel):
@@ -71,7 +72,8 @@ def split_job(job_id:str,body:SplitInput|None=None):
     shutil.rmtree(out_dir,ignore_errors=True)
     max_parts=(body.maxParts if body else None) or j.get('split',{}).get('maxParts',12)
     try:
-        report=pipe.split_model(model,out_dir,max_parts=max_parts,timeout_seconds=600)
+        target_height=(body.targetHeightMm if body else None) or j.get('split',{}).get('targetHeightMm',120)
+        report=pipe.split_model(model,out_dir,max_parts=max_parts,target_height_mm=target_height,timeout_seconds=600)
     except Exception as exc:
         j['split']['status']='failed';j['split']['error']=str(exc)[:300];jobs_mod.save_job(j)
         raise HTTPException(502,f'拆分失败: {exc}')
@@ -83,7 +85,8 @@ def split_job(job_id:str,body:SplitInput|None=None):
             'preview':f'/data/print_jobs/{job_id}/split/parts/{p["preview"]}',
             'dims':p['dims'],'volume':p['volume'],
         })
-    j['split']={'status':'done','parts':parts,'maxParts':max_parts,'partCount':len(parts)}
+    j['split']={'status':'done','parts':parts,'maxParts':max_parts,'targetHeightMm':target_height,
+                'normalization':report.get('normalization',{}),'unit':report.get('unit','millimeter'),'partCount':len(parts)}
     j['color']['palette']=[{'id':f'c{i}','name':n,'hex':h} for i,(n,h) in enumerate([
         ('白','#FFFFFF'),('黑','#1F1F1F'),('红','#E53935'),('橙','#FB8C00'),('黄','#FDD835'),
         ('绿','#43A047'),('蓝','#1E88E5'),('紫','#8E24AA'),('粉','#EC407A'),('青','#00ACC1'),
