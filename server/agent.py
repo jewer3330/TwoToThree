@@ -165,30 +165,43 @@ def _run_environment_check()->dict:
     py_ok=p['py'].exists()
     py_det='hunyuan-bootstrap python' if py_ok else f'bootstrap python 缺失: {p["py"]}'
     add('python','推理 Python 环境','ok' if py_ok else 'bad',py_det)
-    # Hunyuan 依赖：真实 import hy3dgen + torch + CUDA
-    if py_ok:
-        code='import hy3dgen,hy3dgen.rembg,torch;print("CUDA",torch.cuda.is_available())'
-        ok,det=_probe_exec([str(p['py']),'-c',code],timeout=120)
-        hy_deps=ok and ('CUDA True' in det)
-        add('hunyuan.deps','Hunyuan 依赖 hy3dgen/torch/CUDA','ok' if hy_deps else 'bad',det)
+    # Hunyuan 单图：真实跑 runner 的 import 层（--help 即退出，不加载模型），
+    # 与正式执行同一套路径解析（hy3dgen 可能在 LOCAL_ROOT/<runtime> 下）
+    hy_script=(p['repo']/'pipeline'/'run_hunyuan_yoyo.py').exists()
+    add('hunyuan.script','单图 runner','ok' if hy_script else 'bad','ok' if hy_script else 'run_hunyuan_yoyo.py 缺失')
+    hy_deps=False;hy_det=''
+    if py_ok and hy_script:
+        ok,det=_probe_exec([str(p['py']),str(p['repo']/'pipeline'/'run_hunyuan_yoyo.py'),'--help'],timeout=240)
+        hy_deps=ok
+        hy_det=('可导入 hy3dgen/torch' if ok else det)
+    elif not py_ok:
+        hy_det='python 不可用'
     else:
-        hy_deps=False
-        add('hunyuan.deps','Hunyuan 依赖 hy3dgen/torch/CUDA','bad','python 不可用')
+        hy_det='runner 缺失'
+    add('hunyuan.deps','Hunyuan runner 可导入(hy3dgen/torch)','ok' if hy_deps else 'bad',hy_det)
     w1=p['model']/'hunyuan3d-dit-v2-1'/'model.fp16.ckpt';w1c=p['model']/'hunyuan3d-dit-v2-1'/'config.yaml'
     w_ok=w1.exists() and w1c.exists()
     add('hunyuan.weights','Hunyuan3D-2.1 权重','ok' if w_ok else 'bad',
         'ok' if w_ok else f'权重缺失: {p["model"].name}/hunyuan3d-dit-v2-1 (fp16.ckpt/config.yaml)')
     u2_ok=p['u2net'].exists()
     add('hunyuan.rembg','rembg u2net 模型','ok' if u2_ok else 'bad','ok' if u2_ok else f'缺失: {p["u2net"]}')
-    hy_script=(p['repo']/'pipeline'/'run_hunyuan_yoyo.py').exists()
-    add('hunyuan.script','单图 runner','ok' if hy_script else 'bad','ok' if hy_script else 'run_hunyuan_yoyo.py 缺失')
-    # 多视图权重/脚本
+    # 多视图：runner import 层 + 权重
+    mv_script=(p['repo']/'pipeline'/'run_hunyuan_multiview.py').exists()
+    add('hunyuan-mv.script','多视图 runner','ok' if mv_script else 'bad','ok' if mv_script else 'run_hunyuan_multiview.py 缺失')
+    mv_deps=False;mv_det=''
+    if py_ok and mv_script:
+        ok,det=_probe_exec([str(p['py']),str(p['repo']/'pipeline'/'run_hunyuan_multiview.py'),'--help'],timeout=240)
+        mv_deps=ok
+        mv_det=('可导入 hy3dgen' if ok else det)
+    elif not py_ok:
+        mv_det='python 不可用'
+    else:
+        mv_det='runner 缺失'
+    add('hunyuan-mv.deps','多视图 runner 可导入','ok' if mv_deps else 'bad',mv_det)
     mw=p['mv_model']/'hunyuan3d-dit-v2-mv'/'model.fp16.safetensors';mwc=p['mv_model']/'hunyuan3d-dit-v2-mv'/'config.yaml'
     mv_w=mw.exists() and mwc.exists()
     add('hunyuan-mv.weights','Hunyuan3D-2mv 权重','ok' if mv_w else 'bad',
         'ok' if mv_w else f'权重缺失: {p["mv_model"].name}/hunyuan3d-dit-v2-mv')
-    mv_script=(p['repo']/'pipeline'/'run_hunyuan_multiview.py').exists()
-    add('hunyuan-mv.script','多视图 runner','ok' if mv_script else 'bad','ok' if mv_script else 'run_hunyuan_multiview.py 缺失')
     # Blender：真实执行 --version
     b_ok=False;b_det=''
     if p['blender'].exists():
@@ -211,7 +224,7 @@ def _run_environment_check()->dict:
         f'{disk_free:.1f} GB 可用（阈值 {MIN_FREE_GB:.0f} GB）')
     caps={
         'hunyuan3d':py_ok and hy_deps and w_ok and u2_ok and hy_script,
-        'hunyuan3dMultiview':py_ok and hy_deps and mv_w and mv_script,
+        'hunyuan3dMultiview':py_ok and mv_deps and mv_w and mv_script,
         'sf3d':False,'triposr':False,
         'blender':b_ok and renderer,
         'blenderRefinement':b_ok and refiner,
